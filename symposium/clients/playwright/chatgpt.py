@@ -77,13 +77,24 @@ class ChatGPTClient(PlaywrightChatClient):
         self._reply_before = scan_reply_candidates(self._page)
         self._baseline_snap = _page_state_snapshot(self._page, self.name)
         self._last_prompt = text
-        box = self._page.locator("#prompt-textarea").first
+        page = self._page
+        box = page.locator("#prompt-textarea").first
         box.click()
-        box.fill("")
-        box.type(text, delay=10)
-        self._page.wait_for_timeout(300)
+        page.wait_for_timeout(200)
+        # Use clipboard paste — avoids \n being treated as Enter (which sends mid-message)
+        page.evaluate(
+            '''(t) => {
+                const dt = new DataTransfer();
+                dt.setData("text/plain", t);
+                document.activeElement.dispatchEvent(
+                    new ClipboardEvent("paste", {bubbles:true, cancelable:true, clipboardData:dt})
+                );
+            }''',
+            text
+        )
+        page.wait_for_timeout(400)
         try:
-            send = self._page.locator('[data-testid="send-button"]').first
+            send = page.locator('[data-testid="send-button"]').first
             send.click(timeout=3000)
         except Exception:
             box.press("Enter")
