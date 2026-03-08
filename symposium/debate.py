@@ -29,6 +29,7 @@ import tempfile
 import urllib.request
 import urllib.error
 import anthropic
+import ulid
 import yaml
 
 from .clients.base import AIClient
@@ -260,7 +261,7 @@ class SymposiumEngine:
             return False
 
     def _save_round_content(self, round_num: int, client_name: str, content: str) -> str:
-        """Persist a debater's full response to a file. Returns the file path."""
+        """Persist a debater's full response to the legacy output/rounds/ dir. Returns path."""
         output_dir = Path(_CALLBACK_CFG.get("output_dir", "~/Symposium/output")).expanduser()
         round_dir = output_dir / "rounds"
         round_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +269,12 @@ class SymposiumEngine:
         with open(fname, "w", encoding="utf-8") as f:
             f.write(content)
         return str(fname)
+
+    def _session_save(self, filename: str, content: str) -> None:
+        """Save a file into the current debate's .symposium/<ULID>/ session directory."""
+        if hasattr(self, "_session_dir") and self._session_dir:
+            path = self._session_dir / filename
+            path.write_text(content, encoding="utf-8")
 
     def _send_all(self, prompts: dict[str, str], prev_answers: dict[str, str] = None,
                   round_num: int = 0):
@@ -415,20 +422,44 @@ class SymposiumEngine:
         """
         Round flow (strict synchronous):
           For each round N (1..5):
-            1. Both AIs send simultaneously (each gets opponent's R(N-1) file as attachment)
+            1. Both AIs sent simultaneously (each gets opponent's R(N-1) file as attachment)
             2. Wait until BOTH fully stop streaming (text-stable check)
-            3. Extract ONLY latest response from each, save to R{N}_{name}.txt
-            4. (Next round reads from those files — never from live page)
+            3. Extract ONLY latest response, save to R{N}_{name}.txt AND .symposium session
+            4. Hard gate confirms both files before proceeding
         """
         all_rounds: list[RoundResult] = []
         user_guidance = ""
 
+        # ── Create .symposium/<ULID>/ session directory ───────────────────────
+        session_id = str(ulid.new())
+        self._session_dir = Path.home() / ".symposium" / session_id
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+        self._log(f"\n📁 辩论记录目录: ~/.symposium/{session_id}/")
+
+        # Save debate metadata
+        import datetime
+        meta = {
+            "session_id": session_id,
+            "question": question,
+            "participants": [c.name for c in self.clients],
+            "rounds": self.debate_rounds,
+            "started_at": datetime.datetime.now().isoformat(),
+        }
+        self._session_save("meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+
         # ── Send opening context to both AIs before Round 1 ──────────────────
         if opening_context:
             self._log("\n📋 发送开场设定给所有参与方...")
+            # Save opening context prompt for each participant
+            for c in self.clients:
+                self._session_save(f"R0_{c.name}_prompt.md", opening_context)
             setup_prompts = {c.name: opening_context for c in self.clients}
             self._send_all(setup_prompts)
-            self._wait_all(hint_prompt=opening_context)
+            setup_answers = self._wait_all(hint_prompt=opening_context)
+            # Save opening context responses
+            for c in self.clients:
+                ans = setup_answers.get(c.name, "")
+                self._session_save(f"R0_{c.name}_response.md", ans)
             self._log("   ✓ 开场设定已确认")
 
         for rnd in range(1, self.debate_rounds + 1):
@@ -464,6 +495,13 @@ class SymposiumEngine:
                     p = f"【裁判引导】{user_guidance}\n\n" + p
                 prompts[client.name] = p
 
+            # Save prompts to session directory before sending
+            for c in self.clients:
+                self._session_save(
+                    f"R{rnd}_{c.name}_prompt.md",
+                    prompts.get(c.name, "")
+                )
+
             # Step 1: send to all simultaneously
             self._send_all(prompts, round_num=rnd)
 
@@ -493,6 +531,11 @@ class SymposiumEngine:
             else:
                 self._log(f"   ✅ 第{rnd}轮双方回复均已确认完整，进入下一轮")
 
+            # Save responses to session directory
+            for c in self.clients:
+                ans = answers.get(c.name, "")
+                self._session_save(f"R{rnd}_{c.name}_response.md", ans)
+
             # Step 5: API round analysis
             analysis = self._api_round_analysis(rnd, answers)
             rr = RoundResult(round_num=rnd, round_name=rname, answers=answers)
@@ -515,8 +558,11 @@ class SymposiumEngine:
         self._log("\n✨ 最终综合（API）...")
         synthesis = self._api_synthesis(question, all_rounds)
 
+        self._session_save("synthesis.md", synthesis)
+
         # Judge evaluation (independent API call with judge persona — not Claude/ChatGPT web UI)
         judgment = self._judge_evaluation(question, all_rounds)
+        self._session_save("judgment.md", judgment)
 
         # Save full result to output file
         output_dir = Path(_CALLBACK_CFG.get("output_dir", "~/Symposium/output")).expanduser()
