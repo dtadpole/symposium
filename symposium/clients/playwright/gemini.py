@@ -52,11 +52,11 @@ class GeminiWebClient(PlaywrightChatClient):
             pass
 
     def _init_conversation(self):
-        self._page.goto(self.start_url, wait_until="domcontentloaded")
-        self._page.wait_for_timeout(4000)
+        self._page.goto(self.start_url, wait_until="domcontentloaded", timeout=60000)
+        self._page.wait_for_timeout(6000)
         self._page.wait_for_selector(
             'rich-textarea, .ql-editor, textarea[placeholder], [contenteditable="true"]',
-            timeout=20000
+            timeout=60000
         )
 
     def _type_and_send(self, text: str):
