@@ -375,24 +375,48 @@ class SymposiumEngine:
         pending = {c.name: c for c in self.clients}
         results: dict[str, str] = {}
 
-        # Phase-1 gate: track which clients have been seen actively generating
-        # (stop button appeared). Prevents false "done" from stale signals on
-        # previous conversation turns (e.g. ChatGPT Copy button always present).
+        # Phase-1 gate: track which clients have started generating.
+        # Prevents false "done" from stale UI (e.g. ChatGPT Copy button always present).
+        # Fallback: if check_done() is True AND text grew significantly, stop was missed.
         _seen_generating: set[str] = set()
+        _baseline_len: dict[str, int] = {}
+
+        # Record baseline text length for each client right now (before responses)
+        from .clients.playwright.response_waiter import _el_exists, PLATFORM_HINTS as _PH, _page_state_snapshot
+        for c in self.clients:
+            try:
+                snap = _page_state_snapshot(c._page, c.name)
+                _baseline_len[c.name] = snap.get("text_len", 0)
+            except Exception:
+                _baseline_len[c.name] = 0
 
         while pending and (time.time() - start) < HARD_TIMEOUT:
             for name in list(pending.keys()):
                 c = pending[name]
                 try:
-                    from .clients.playwright.response_waiter import _el_exists, PLATFORM_HINTS as _PH
                     stop_sels = _PH.get(c.name, {}).get("stop_sels", [])
 
-                    # Phase 1: must first see stop-button (= client is generating)
+                    # Phase 1: confirm client started generating
                     if name not in _seen_generating:
                         if _el_exists(c._page, stop_sels):
+                            # stop button is visible → currently generating
                             _seen_generating.add(name)
                             self._log(f"   🟡 {name} 已开始生成...")
-                        continue  # don't check done until we've seen it start
+                            continue
+
+                        # Fallback: stop button missed (responded too fast) —
+                        # check if text grew significantly AND done signal present
+                        if check_done(c._page, c.name):
+                            snap = _page_state_snapshot(c._page, c.name)
+                            cur_len = snap.get("text_len", 0)
+                            baseline = _baseline_len.get(name, 0)
+                            if cur_len > baseline + 200:
+                                self._log(f"   🟡 {name} stop button missed (responded fast), text grew {cur_len - baseline} chars — treating as started")
+                                _seen_generating.add(name)
+                            else:
+                                continue  # not started yet
+                        else:
+                            continue  # not started, not done
 
                     # Phase 2: stop-button gone + text stable = truly done
                     if check_done(c._page, c.name):
