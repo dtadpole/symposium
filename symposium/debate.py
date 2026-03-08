@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Callable
 
 import json
+import subprocess
+import tempfile
 import urllib.request
 import urllib.error
 import anthropic
@@ -83,21 +85,7 @@ ROUND_PROMPTS: dict   = {int(k): v for k, v in _FORMAT_CFG.get("round_prompts", 
 DEFAULT_ROUNDS: int   = int(_FORMAT_CFG.get("debate_rounds", 5))
 JUDGE_IDENTITY        = _PERSONA_CFG.get("judge_identity", "")
 JUDGE_EVAL_PROMPT     = _PERSONA_CFG.get("judge_evaluation_prompt", "")
-_TG_NOTIFY_CFG        = _PERSONA_CFG.get("telegram_notify", {})
-
-# ── Telegram Bot token — read from OpenClaw config, not hardcoded ─────────────
-
-def _load_tg_bot_token() -> str:
-    """Read Telegram bot token from OpenClaw config (~/.openclaw/openclaw.json)."""
-    try:
-        cfg_path = Path.home() / ".openclaw" / "openclaw.json"
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        return cfg.get("channels", {}).get("telegram", {}).get("botToken", "")
-    except Exception:
-        return ""
-
-_TG_BOT_TOKEN = _load_tg_bot_token()
+_CALLBACK_CFG         = _PERSONA_CFG.get("callback", {})
 
 
 
@@ -242,38 +230,33 @@ class SymposiumEngine:
         except Exception as e:
             return f"[裁判评判失败: {e}]"
 
-    def _send_telegram(self, text: str) -> bool:
-        """Send message to Zhen via Telegram Bot API."""
-        notify_cfg = _TG_NOTIFY_CFG
-        if not notify_cfg.get("enabled", False):
-            return False
-        token = _TG_BOT_TOKEN
-        chat_id = notify_cfg.get("chat_id", "")
-        if not token or not chat_id:
-            self._log("⚠️  Telegram 通知未配置（缺少 bot token 或 chat_id）")
+    def _callback_to_parent(self, result_path: str, summary: str) -> bool:
+        """Notify parent agent (OpenClaw/Blue Lantern) that debate is complete.
+
+        Symposium does NOT send to users directly. Instead, it calls back to the
+        OpenClaw main agent via `openclaw agent --channel last --deliver`.
+        The parent agent determines the correct channel (Telegram / WhatsApp / etc.)
+        and routes the result to the user.
+
+        Args:
+            result_path: path to the full debate result markdown file
+            summary:     short notification text for the parent agent
+        """
+        if not _CALLBACK_CFG.get("enabled", False):
             return False
         try:
-            # Telegram message limit: 4096 chars; split if needed
-            max_len = 4000
-            chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)]
-            for chunk in chunks:
-                payload = json.dumps({
-                    "chat_id": chat_id,
-                    "text": chunk,
-                    "parse_mode": "Markdown",
-                }).encode("utf-8")
-                url = f"https://api.telegram.org/bot{token}/sendMessage"
-                req = urllib.request.Request(
-                    url, data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    pass
-            self._log("📨  辩论结果已发送到 Telegram")
-            return True
+            args = _CALLBACK_CFG.get("openclaw_agent_args", "--channel last --deliver")
+            cmd = ["openclaw", "agent"] + args.split() + ["--message", summary]
+            self._log(f"📡  回传给 OpenClaw parent agent: {' '.join(cmd[:5])}...")
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if proc.returncode == 0:
+                self._log("✅  Parent agent 已收到辩论结果，将自动路由给用户")
+                return True
+            else:
+                self._log(f"⚠️  Parent agent 回传失败 (rc={proc.returncode}): {proc.stderr[:200]}")
+                return False
         except Exception as e:
-            self._log(f"⚠️  Telegram 发送失败: {e}")
+            self._log(f"⚠️  Parent agent 回传异常: {e}")
             return False
 
     def _send_all(self, prompts: dict[str, str]):
@@ -422,19 +405,31 @@ class SymposiumEngine:
         self._log("\n✨ 最终综合（API）...")
         synthesis = self._api_synthesis(question, all_rounds)
 
-        # Judge evaluation (independent, using OpenClaw API model with judge persona)
+        # Judge evaluation (independent API call with judge persona — not Claude/ChatGPT web UI)
         judgment = self._judge_evaluation(question, all_rounds)
 
-        # Send result to Telegram
-        tg_message = (
-            f"🏛️ *Symposium 辩论结束*\n"
-            f"议题：{question[:80]}...\n\n"
-            f"{'━'*30}\n"
-            f"*裁判评判*\n\n{judgment}\n\n"
-            f"{'━'*30}\n"
-            f"*综合建议*\n\n{synthesis}"
+        # Save full result to output file
+        output_dir = Path(_CALLBACK_CFG.get("output_dir", "~/Symposium/output")).expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        import datetime
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        result_path = output_dir / f"debate_{ts}.md"
+        with open(result_path, "w", encoding="utf-8") as f:
+            f.write(f"# Symposium 辩论结果\n\n")
+            f.write(f"**议题：** {question}\n\n")
+            f.write(f"---\n\n## 裁判评判\n\n{judgment}\n\n")
+            f.write(f"---\n\n## 综合建议\n\n{synthesis}\n\n")
+            f.write(f"---\n\n## 完整辩论记录\n\n{self._build_transcript(all_rounds)}\n")
+        self._log(f"💾  辩论结果已保存: {result_path}")
+
+        # Callback to parent agent (OpenClaw/Blue Lantern) — parent routes to user's channel
+        callback_msg = (
+            f"Symposium 辩论结束。议题：{question[:60]}...\n\n"
+            f"完整结果文件：{result_path}\n\n"
+            f"【裁判评判摘要】\n{judgment[:1500]}\n\n"
+            f"【综合建议摘要】\n{synthesis[:800]}"
         )
-        self._send_telegram(tg_message)
+        self._callback_to_parent(str(result_path), callback_msg)
 
         return SymposiumResult(
             question=question,

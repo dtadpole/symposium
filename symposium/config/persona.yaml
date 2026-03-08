@@ -44,12 +44,16 @@ judge_evaluation_prompt: |
   五、综合建议
   如果综合双方最好的观点，最优的设计应该是什么？（具体说方案）
 
-# ── Telegram 通知配置 ─────────────────────────
+# ── 结果回传配置 ─────────────────────────────
+# Symposium 不直接发消息给用户。辩论完成后，调用 OpenClaw parent agent，
+# 由 parent agent 自行判断 channel 并把结果路由给用户。
 
-telegram_notify:
+callback:
   enabled: true
-  chat_id: "7827568294"     # Zhen 的 Telegram user ID
-  # bot_token 从 OpenClaw config 自动读取，不在此处硬编码
+  # 结果存放目录（parent agent 从这里读取）
+  output_dir: "~/Symposium/output"
+  # 通过 openclaw agent 回传给 parent session（自动路由到用户当前 channel）
+  openclaw_agent_args: "--channel last --deliver"
 
 # ─────────────────────────────────────────────
 
