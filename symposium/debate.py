@@ -24,6 +24,7 @@ from typing import Callable
 import anthropic
 
 from .clients.base import AIClient
+from .clients.playwright.chatgpt import ATTACHMENT_MARKER
 from .clients.playwright.response_waiter import check_done, extract_reply_after_anchor
 
 
@@ -288,11 +289,35 @@ class SymposiumEngine:
         return self._api_call(prompt, max_tokens=3000)
 
     def _send_all(self, prompts: dict[str, str]):
-        """Pipeline: send to all clients sequentially (fast)."""
+        """Pipeline: send to all clients sequentially (fast).
+
+        For ChatGPT: if prompt contains {other_full} block, extract it and
+        send as file attachment (using ATTACHMENT_MARKER split).
+        For Claude: ClipboardEvent paste already displays long text as a block.
+        """
         for c in self.clients:
-            full = REPLY_FORMAT_RULE + prompts.get(c.name, "")
+            prompt = prompts.get(c.name, "")
+            full = REPLY_FORMAT_RULE + prompt
             self._log(f"   ✉️  发送给 {c.name}...")
             try:
+                # For ChatGPT: split out the attachment section (between ──── delimiters)
+                if c.name == "ChatGPT" and "────────────────────────────────────────" in full:
+                    import re
+                    # Extract content between the delimiter lines as attachment
+                    m = re.search(
+                        r'────────────────────────────────────────\n(.*?)\n────────────────────────────────────────',
+                        full, re.DOTALL
+                    )
+                    if m:
+                        attachment_content = m.group(1).strip()
+                        # Replace the block with a reference line
+                        main_text = re.sub(
+                            r'────────────────────────────────────────\n.*?\n────────────────────────────────────────',
+                            '（对方完整发言见附件）',
+                            full, flags=re.DOTALL
+                        )
+                        # Inject attachment marker for chatgpt client
+                        full = main_text + f"\n\n{ATTACHMENT_MARKER}\n" + attachment_content
                 c._type_and_send(full)
             except Exception as e:
                 self._log(f"   ⚠️  {c.name} 发送失败: {e}")

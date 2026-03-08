@@ -1,10 +1,15 @@
 """ChatGPT web client via Playwright."""
 
+import tempfile
 import time
+from pathlib import Path
 from .base import PlaywrightChatClient
 from .chooser import choose_best
 from .reply_extractor import scan_reply_candidates, extract_reply
 from .response_waiter import _page_state_snapshot, wait_for_completion, extract_reply_after_anchor
+
+# Marker used to split attachment content from main prompt
+ATTACHMENT_MARKER = "<<<ATTACHMENT>>>"
 
 
 class ChatGPTClient(PlaywrightChatClient):
@@ -25,7 +30,6 @@ class ChatGPTClient(PlaywrightChatClient):
                 .slice(0,140)''')
             choice = choose_best('ChatGPT', current, options)
 
-            # Pick chosen model
             target_model = choice.get('target_model', '')
             if target_model:
                 try:
@@ -36,7 +40,6 @@ class ChatGPTClient(PlaywrightChatClient):
                 except Exception:
                     pass
 
-            # Ensure strongest thinking mode
             mode_candidates = [x for x in [choice.get('target_mode', ''), 'Extended thinking', 'Thinking', 'Pro'] if x]
             for target_mode in mode_candidates:
                 try:
@@ -51,7 +54,6 @@ class ChatGPTClient(PlaywrightChatClient):
             pass
 
     def _init_conversation(self):
-        # Retry up to 3 times in case of navigation abort
         for attempt in range(3):
             try:
                 self._page.goto(self.start_url, wait_until="domcontentloaded", timeout=20000)
@@ -62,7 +64,6 @@ class ChatGPTClient(PlaywrightChatClient):
                     raise
                 self._page.wait_for_timeout(2000)
 
-        # Click "New Chat" if present
         try:
             new_chat = self._page.locator('[data-testid="create-new-chat-button"], a[href="/"]').first
             if new_chat.is_visible(timeout=2000):
@@ -70,18 +71,84 @@ class ChatGPTClient(PlaywrightChatClient):
                 self._page.wait_for_timeout(1500)
         except Exception:
             pass
-        # Wait for input to appear
         self._page.wait_for_selector("#prompt-textarea", timeout=20000)
 
+    def _upload_file(self, content: str, filename: str = "opponent_argument.txt") -> bool:
+        """Upload content as a file attachment to ChatGPT. Returns True if successful."""
+        page = self._page
+        try:
+            # Write content to a temp file
+            tmp = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.txt', prefix='symposium_',
+                delete=False, encoding='utf-8'
+            )
+            tmp.write(content)
+            tmp.flush()
+            tmp_path = tmp.name
+            tmp.close()
+
+            # Find the file upload button (paperclip / attach)
+            upload_btn = None
+            for sel in [
+                'button[aria-label="Attach files"]',
+                'button[aria-label="附加文件"]',
+                'button[data-testid="composer-attachment-button"]',
+                'label[for*="file"], input[type="file"]',
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if el.is_visible(timeout=1500):
+                        upload_btn = el
+                        break
+                except Exception:
+                    pass
+
+            if upload_btn is None:
+                return False
+
+            # Use set_input_files for file input, or click button
+            file_input = page.locator('input[type="file"]').first
+            if file_input.count() > 0:
+                file_input.set_input_files(tmp_path)
+            else:
+                with page.expect_file_chooser() as fc_info:
+                    upload_btn.click()
+                fc = fc_info.value
+                fc.set_files(tmp_path)
+
+            # Wait for upload indicator
+            page.wait_for_timeout(2000)
+
+            # Clean up temp file
+            try:
+                Path(tmp_path).unlink()
+            except Exception:
+                pass
+
+            return True
+        except Exception as e:
+            return False
+
     def _type_and_send(self, text: str):
+        """Send message. If text contains attachment marker, upload that part as file."""
         self._reply_before = scan_reply_candidates(self._page)
         self._baseline_snap = _page_state_snapshot(self._page, self.name)
         self._last_prompt = text
         page = self._page
+
+        # Check if there's attachment content to upload
+        main_text = text
+        if ATTACHMENT_MARKER in text:
+            parts = text.split(ATTACHMENT_MARKER, 1)
+            main_text = parts[0].strip()
+            attachment_content = parts[1].strip()
+            self._upload_file(attachment_content)
+            page.wait_for_timeout(500)
+
+        # Paste main text via ClipboardEvent
         box = page.locator("#prompt-textarea").first
         box.click()
         page.wait_for_timeout(200)
-        # Use clipboard paste — avoids \n being treated as Enter (which sends mid-message)
         page.evaluate(
             '''(t) => {
                 const dt = new DataTransfer();
@@ -90,7 +157,7 @@ class ChatGPTClient(PlaywrightChatClient):
                     new ClipboardEvent("paste", {bubbles:true, cancelable:true, clipboardData:dt})
                 );
             }''',
-            text
+            main_text
         )
         page.wait_for_timeout(400)
         try:
