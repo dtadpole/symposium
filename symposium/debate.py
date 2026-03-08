@@ -184,6 +184,24 @@ class SymposiumEngine:
             return self.user_input_fn(display)
         return ""
 
+    def _summarize_for_challenge(self, name: str, answer: str) -> str:
+        """Summarize one AI's answer to key points for use in a challenge prompt."""
+        if not self._anthropic or len(answer) < 800:
+            return answer  # short enough, use as-is
+        prompt = (
+            f"以下是 {name} 对知识库问题的回答，请提炼出最核心的3-5个论点，"
+            f"每点1-2句话，保留具体数据结构或机制名称，去掉重复和废话：\n\n{answer}"
+        )
+        try:
+            msg = self._anthropic.messages.create(
+                model=self._api_model,
+                max_tokens=600,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text.strip()
+        except Exception:
+            return answer[:1500]  # fallback: truncate
+
     def _api_summarize(self, question: str, answers: dict[str, str]) -> str:
         """Use Claude API to summarize/compare answers. Fast, no browser."""
         if not self._anthropic:
@@ -275,9 +293,11 @@ class SymposiumEngine:
             for i, client in enumerate(self.clients):
                 other = self.clients[(i + 1) % len(self.clients)]
                 other_ans = prev_answers.get(other.name, "")
+                # Summarize opponent's answer to key points before sending
+                other_summary = self._summarize_for_challenge(other.name, other_ans)
                 challenge = CHALLENGE_TMPL.format(
                     other_name=other.name,
-                    other_answer=other_ans[:2000],
+                    other_answer=other_summary,
                 )
                 if guidance:
                     challenge = USER_GUIDANCE_TMPL.format(guidance=guidance) + "\n\n" + challenge
