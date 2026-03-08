@@ -23,6 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import json
+import urllib.request
+import urllib.error
 import anthropic
 import yaml
 
@@ -73,11 +76,28 @@ _persona_block    = (
     f"辩手准则：\n{_rules_text}\n\n"
     f"{_judge_desc}\n"
 )
-OPENING_CONTEXT     = _persona_block + _CONTENT_CFG.get("opening_context", "")
-DEFAULT_QUESTION    = _CONTENT_CFG.get("question", "")
-ROUND_NAMES: dict   = {int(k): v for k, v in _FORMAT_CFG.get("round_names", {}).items()}
-ROUND_PROMPTS: dict = {int(k): v for k, v in _FORMAT_CFG.get("round_prompts", {}).items()}
-DEFAULT_ROUNDS: int = int(_FORMAT_CFG.get("debate_rounds", 5))
+OPENING_CONTEXT       = _persona_block + _CONTENT_CFG.get("opening_context", "")
+DEFAULT_QUESTION      = _CONTENT_CFG.get("question", "")
+ROUND_NAMES: dict     = {int(k): v for k, v in _FORMAT_CFG.get("round_names", {}).items()}
+ROUND_PROMPTS: dict   = {int(k): v for k, v in _FORMAT_CFG.get("round_prompts", {}).items()}
+DEFAULT_ROUNDS: int   = int(_FORMAT_CFG.get("debate_rounds", 5))
+JUDGE_IDENTITY        = _PERSONA_CFG.get("judge_identity", "")
+JUDGE_EVAL_PROMPT     = _PERSONA_CFG.get("judge_evaluation_prompt", "")
+_TG_NOTIFY_CFG        = _PERSONA_CFG.get("telegram_notify", {})
+
+# ── Telegram Bot token — read from OpenClaw config, not hardcoded ─────────────
+
+def _load_tg_bot_token() -> str:
+    """Read Telegram bot token from OpenClaw config (~/.openclaw/openclaw.json)."""
+    try:
+        cfg_path = Path.home() / ".openclaw" / "openclaw.json"
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("channels", {}).get("telegram", {}).get("botToken", "")
+    except Exception:
+        return ""
+
+_TG_BOT_TOKEN = _load_tg_bot_token()
 
 
 
@@ -191,6 +211,70 @@ class SymposiumEngine:
             "4. 这个方案为什么比任何单方的方案更好"
         )
         return self._api_call(prompt, max_tokens=3000)
+
+    def _build_transcript(self, all_rounds: list[RoundResult]) -> str:
+        """Build full debate transcript for judge evaluation."""
+        parts = []
+        for r in all_rounds:
+            parts.append(f"{'━'*40}\n【第{r.round_num}轮：{r.round_name}】\n{'━'*40}")
+            for name, answer in r.answers.items():
+                parts.append(f"\n── {name} ──\n{answer}")
+            if r.user_guidance:
+                parts.append(f"\n【裁判引导】{r.user_guidance}")
+        return "\n\n".join(parts)
+
+    def _judge_evaluation(self, question: str, all_rounds: list[RoundResult]) -> str:
+        """Run independent judge evaluation using OpenClaw's API model."""
+        if not self._anthropic:
+            return "[无法进行裁判评判：API key 未配置]"
+        transcript = self._build_transcript(all_rounds)
+        system = JUDGE_IDENTITY.strip()
+        prompt = JUDGE_EVAL_PROMPT.format(debate_transcript=transcript)
+        try:
+            self._log("\n🏛️  裁判评判中（API）...")
+            msg = self._anthropic.messages.create(
+                model=self._api_model,
+                max_tokens=4000,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text.strip()
+        except Exception as e:
+            return f"[裁判评判失败: {e}]"
+
+    def _send_telegram(self, text: str) -> bool:
+        """Send message to Zhen via Telegram Bot API."""
+        notify_cfg = _TG_NOTIFY_CFG
+        if not notify_cfg.get("enabled", False):
+            return False
+        token = _TG_BOT_TOKEN
+        chat_id = notify_cfg.get("chat_id", "")
+        if not token or not chat_id:
+            self._log("⚠️  Telegram 通知未配置（缺少 bot token 或 chat_id）")
+            return False
+        try:
+            # Telegram message limit: 4096 chars; split if needed
+            max_len = 4000
+            chunks = [text[i:i+max_len] for i in range(0, len(text), max_len)]
+            for chunk in chunks:
+                payload = json.dumps({
+                    "chat_id": chat_id,
+                    "text": chunk,
+                    "parse_mode": "Markdown",
+                }).encode("utf-8")
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                req = urllib.request.Request(
+                    url, data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    pass
+            self._log("📨  辩论结果已发送到 Telegram")
+            return True
+        except Exception as e:
+            self._log(f"⚠️  Telegram 发送失败: {e}")
+            return False
 
     def _send_all(self, prompts: dict[str, str]):
         """Pipeline: send to all clients sequentially (fast).
@@ -337,6 +421,20 @@ class SymposiumEngine:
         # Final synthesis
         self._log("\n✨ 最终综合（API）...")
         synthesis = self._api_synthesis(question, all_rounds)
+
+        # Judge evaluation (independent, using OpenClaw API model with judge persona)
+        judgment = self._judge_evaluation(question, all_rounds)
+
+        # Send result to Telegram
+        tg_message = (
+            f"🏛️ *Symposium 辩论结束*\n"
+            f"议题：{question[:80]}...\n\n"
+            f"{'━'*30}\n"
+            f"*裁判评判*\n\n{judgment}\n\n"
+            f"{'━'*30}\n"
+            f"*综合建议*\n\n{synthesis}"
+        )
+        self._send_telegram(tg_message)
 
         return SymposiumResult(
             question=question,
