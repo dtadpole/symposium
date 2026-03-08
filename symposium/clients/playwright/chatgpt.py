@@ -8,7 +8,7 @@ from .response_waiter import _page_state_snapshot, wait_for_completion, extract_
 
 
 class ChatGPTClient(PlaywrightChatClient):
-    name = "GPT"
+    name = "ChatGPT"
     start_url = "https://chatgpt.com/"
 
     def ensure_best_config(self):

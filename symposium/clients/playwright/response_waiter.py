@@ -40,15 +40,13 @@ UI_NOISE = re.compile(
 PLATFORM_HINTS = {
     "Claude": {
         "stop_sels": ['[aria-label="Stop"]', 'button:has-text("Stop")'],
-        "thinking_sels": ['[data-is-streaming="true"]', '.loading'],
+        "thinking_sels": ['[data-is-streaming="true"]'],
         "send_sels": ['button[aria-label="Send message"]', '[data-testid="send-button"]'],
-        # Feedback buttons appear only after output is fully complete
+        # Confirmed selectors (inspected live DOM 2026-03-08)
         "done_sels": [
-            'button[aria-label="Thumbs up"]',
-            'button[aria-label="Thumbs down"]',
-            '[data-testid="thumbs-up"]',
-            '[data-testid="thumbs-down"]',
-            'button[aria-label="Copy response"]',
+            'button[aria-label="Give positive feedback"]',
+            'button[aria-label="Give negative feedback"]',
+            '[data-is-streaming="false"]',
         ],
     },
     "ChatGPT": {
