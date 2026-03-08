@@ -1,13 +1,12 @@
 """
-Symposium Debate Engine — 6-round structured debate.
+Symposium Debate Engine — 5-round structured debate.
 
 Round structure:
-  0 (R1): Opening statement — position, 2 core arguments, key disputes
-  1 (R2): Focused questioning — 2-3 questions on opponent's premises
-  2 (R3): Framework attack — challenge definitions and judgment standards
-  3 (R4): Substantive attack — attack core arguments, compress to 1-2 deciding questions
-  4 (R5): Focused free debate — only on established core disputes
-  5 (R6): Closing statement — why my side wins
+  R1: 开篇立论  — position, definitions, 2 core arguments, key disputes
+  R2: 聚焦质询  — 2-3 targeted questions on opponent's premises
+  R3: 集中攻防  — respond + attack + defend + compress to 1-2 deciding questions
+  R4: 焦点自由辩 — only established disputes, no new arguments
+  R5: 总结陈词  — closing: why my side wins
 
 Architecture:
   - 2 browser clients opened ONCE, kept alive throughout
@@ -158,7 +157,7 @@ class SymposiumEngine:
         self,
         clients: list[AIClient],
         api_key: str | None = None,
-        debate_rounds: int = 6,
+        debate_rounds: int = 5,
         user_input_fn: Callable[[str], str] | None = None,
         log_fn: Callable[[str], None] | None = None,
     ):
@@ -297,11 +296,20 @@ class SymposiumEngine:
         lines += ["\n─── API 分析 ───", analysis, sep]
         return "\n".join(lines)
 
-    def run(self, question: str) -> SymposiumResult:
+    def run(self, question: str, opening_context: str = "") -> SymposiumResult:
         all_rounds: list[RoundResult] = []
-        names = [c.name for c in self.clients]
         prev_answers: dict[str, str] = {}
         user_guidance = ""
+
+        # ── Send opening context to both AIs before Round 1 ──────────────────
+        if opening_context:
+            self._log("\n📋 发送开场设定给所有参与方...")
+            setup_prompts = {c.name: opening_context for c in self.clients}
+            self._send_all(setup_prompts)
+            setup_answers = self._wait_all(hint_prompt=opening_context)
+            self._log("   ✓ 开场设定已确认")
+            # Store setup context for reference
+            prev_answers = setup_answers  # so R1 can reference if needed
 
         for rnd in range(1, self.debate_rounds + 1):
             rname = ROUND_NAMES.get(rnd, f"第{rnd}轮")
