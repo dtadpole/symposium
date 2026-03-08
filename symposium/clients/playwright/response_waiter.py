@@ -167,6 +167,16 @@ def _scroll_to_bottom(page):
         pass
 
 
+def check_done(page, platform: str) -> bool:
+    """Non-blocking check: are feedback buttons visible? (= AI finished responding)"""
+    try:
+        _scroll_to_bottom(page)
+        snap = _page_state_snapshot(page, platform)
+        return _is_stable(snap)
+    except Exception:
+        return False
+
+
 def wait_for_completion(page, platform: str, baseline_snap: dict) -> str:
     """
     Poll page state until stable, stuck, or timeout.

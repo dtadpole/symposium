@@ -21,7 +21,10 @@ from typing import Callable
 
 import anthropic
 
+import time
+
 from .clients.base import AIClient
+from .clients.playwright.response_waiter import check_done, extract_reply_after_anchor
 
 
 def _load_openclaw_anthropic() -> tuple[str | None, str]:
@@ -115,6 +118,58 @@ class SymposiumEngine:
         except Exception as e:
             return f"[Error from {client.name}: {e}]"
 
+    def _ask_all_pipeline(self, clients: list[AIClient], prompt: str) -> dict[str, str]:
+        """
+        Pipeline: send sequentially (fast), then poll all pages until each is done.
+        While waiting for C1, C2 and C3 already have their messages sent.
+        """
+        POLL_INTERVAL = 15   # seconds between polls
+        HARD_TIMEOUT = 900   # 15 min
+
+        # Step 1: send to all clients sequentially (fast)
+        for c in clients:
+            self._log(f"   ✉️  发送给 {c.name}...")
+            try:
+                c._type_and_send(prompt)
+            except Exception as e:
+                self._log(f"   ⚠️  {c.name} 发送失败: {e}")
+
+        # Step 2: poll all pages until each reports done
+        self._log("   ⏳ 等待各方回复（轮询中）...")
+        start = time.time()
+        pending = {c.name: c for c in clients}
+        results: dict[str, str] = {}
+
+        while pending and (time.time() - start) < HARD_TIMEOUT:
+            for name in list(pending.keys()):
+                c = pending[name]
+                try:
+                    if check_done(c._page, c.name):
+                        ans = extract_reply_after_anchor(c._page, c.name,
+                                                         getattr(c, '_last_prompt', prompt))
+                        if not ans:
+                            ans = c._wait_for_response()
+                        results[name] = ans
+                        self._log(f"   ✓ {name} 完成 ({len(ans)} chars)")
+                        del pending[name]
+                except Exception as e:
+                    self._log(f"   ⚠️  {name} 轮询出错: {e}")
+
+            if pending:
+                self._log(f"   ⏳ 还在等: {list(pending.keys())} "
+                          f"(已过 {int(time.time()-start)}s)")
+                time.sleep(POLL_INTERVAL)
+
+        # timeout fallback
+        for name, c in pending.items():
+            self._log(f"   ⏰ {name} 超时，尝试强制提取...")
+            try:
+                results[name] = c._wait_for_response()
+            except Exception as e:
+                results[name] = f"[{name} timeout: {e}]"
+
+        return results
+
     def _ask_user(self, display: str) -> str:
         if self.user_input_fn:
             return self.user_input_fn(display)
@@ -182,14 +237,9 @@ class SymposiumEngine:
         all_rounds: list[RoundResult] = []
         names = [c.name for c in self.clients]
 
-        # ── Round 0: each AI answers the original question ────────────────────
-        self._log("⚗️  Round 0: 三家 AI 回答初始问题...")
-        r0_answers: dict[str, str] = {}
-        for c in self.clients:
-            self._log(f"   → {c.name} 回答中...")
-            ans = self._ask(c, question)
-            r0_answers[c.name] = ans
-            self._log(f"   ✓ {c.name} 完成 ({len(ans)} chars)")
+        # ── Round 0: pipeline send → parallel wait ─────────────────────────────
+        self._log("⚗️  Round 0: 三家 AI 流水线发送 + 并行等待...")
+        r0_answers = self._ask_all_pipeline(self.clients, question)
 
         analysis0 = self._api_summarize(question, r0_answers)
         r0 = RoundResult(round_num=0, answers=r0_answers)
@@ -211,23 +261,49 @@ class SymposiumEngine:
             prev_answers = all_rounds[-1].answers
             rnd_answers: dict[str, str] = {}
 
+            # Build per-client challenge prompts
+            challenge_prompts: dict[str, str] = {}
             for i, client in enumerate(self.clients):
-                # This client challenges the next one
                 other = self.clients[(i + 1) % len(self.clients)]
                 other_ans = prev_answers.get(other.name, "")
-
                 challenge = CHALLENGE_TMPL.format(
                     other_name=other.name,
                     other_answer=other_ans[:2000],
                 )
-                # If user gave guidance, prepend it
                 if guidance:
                     challenge = USER_GUIDANCE_TMPL.format(guidance=guidance) + "\n\n" + challenge
+                challenge_prompts[client.name] = challenge
 
-                self._log(f"   {client.name} 回应 {other.name} 的挑战...")
-                ans = self._ask(client, challenge)
-                rnd_answers[client.name] = ans
-                self._log(f"   ✓ {client.name} 完成 ({len(ans)} chars)")
+            # Pipeline: send sequentially then poll all
+            self._log(f"   流水线发送挑战...")
+            for c in self.clients:
+                self._log(f"   ✉️  发送给 {c.name}...")
+                try:
+                    c._type_and_send(challenge_prompts[c.name])
+                except Exception as e:
+                    self._log(f"   ⚠️  {c.name} 发送失败: {e}")
+
+            self._log("   ⏳ 等待各方回复（轮询中）...")
+            start_t = time.time()
+            pending2 = {c.name: c for c in self.clients}
+            while pending2 and (time.time() - start_t) < 900:
+                for name in list(pending2.keys()):
+                    c = pending2[name]
+                    try:
+                        if check_done(c._page, c.name):
+                            ans = extract_reply_after_anchor(
+                                c._page, c.name,
+                                getattr(c, '_last_prompt', challenge_prompts[name]))
+                            if not ans:
+                                ans = c._wait_for_response()
+                            rnd_answers[name] = ans
+                            self._log(f"   ✓ {name} 完成 ({len(ans)} chars)")
+                            del pending2[name]
+                    except Exception as e:
+                        self._log(f"   ⚠️  {name} 出错: {e}")
+                if pending2:
+                    self._log(f"   ⏳ 还在等: {list(pending2.keys())} ({int(time.time()-start_t)}s)")
+                    time.sleep(15)
 
             analysis = self._api_summarize(question, rnd_answers)
             rr = RoundResult(round_num=rnd, answers=rnd_answers)
