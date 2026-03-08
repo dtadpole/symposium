@@ -45,6 +45,13 @@ def _load_openclaw_anthropic() -> tuple[str | None, str]:
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
+# Prepended to EVERY message sent to any AI
+REPLY_FORMAT_RULE = (
+    "【重要格式要求】请将你的完整回答直接写在对话主回复中，"
+    "不要创建任何文档、artifact、代码块外的独立文件或附件。"
+    "所有内容必须在这条消息的正文里。\n\n"
+)
+
 CHALLENGE_TMPL = """{other_name} 对你之前的方案提出了以下观点：
 
 {other_answer}
@@ -126,11 +133,13 @@ class SymposiumEngine:
         POLL_INTERVAL = 15   # seconds between polls
         HARD_TIMEOUT = 900   # 15 min
 
+        full_prompt = REPLY_FORMAT_RULE + prompt
+
         # Step 1: send to all clients sequentially (fast)
         for c in clients:
             self._log(f"   ✉️  发送给 {c.name}...")
             try:
-                c._type_and_send(prompt)
+                c._type_and_send(full_prompt)
             except Exception as e:
                 self._log(f"   ⚠️  {c.name} 发送失败: {e}")
 
@@ -261,7 +270,7 @@ class SymposiumEngine:
             prev_answers = all_rounds[-1].answers
             rnd_answers: dict[str, str] = {}
 
-            # Build per-client challenge prompts
+            # Build per-client challenge prompts (format rule prepended)
             challenge_prompts: dict[str, str] = {}
             for i, client in enumerate(self.clients):
                 other = self.clients[(i + 1) % len(self.clients)]
@@ -272,7 +281,7 @@ class SymposiumEngine:
                 )
                 if guidance:
                     challenge = USER_GUIDANCE_TMPL.format(guidance=guidance) + "\n\n" + challenge
-                challenge_prompts[client.name] = challenge
+                challenge_prompts[client.name] = REPLY_FORMAT_RULE + challenge
 
             # Pipeline: send sequentially then poll all
             self._log(f"   流水线发送挑战...")
