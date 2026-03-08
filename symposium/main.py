@@ -14,7 +14,7 @@ from pathlib import Path
 from .config import available_clients
 from .clients.claude import ClaudeClient
 from .clients.gemini import GeminiClient
-from .clients.gpt import GPTClient
+from .clients import GPTClient
 from .debate import SymposiumEngine
 from .output import print_result, save_markdown
 
@@ -40,7 +40,7 @@ def build_clients():
         except Exception as e:
             print(f"  ✗ Gemini: {e}")
 
-    if "gpt" in available:
+    if "gpt" in available and GPTClient is not None:
         try:
             clients.append(GPTClient())
             print("  ✓ GPT")
