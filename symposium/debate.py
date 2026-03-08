@@ -80,8 +80,10 @@ ROUND_PROMPTS = {
 这一轮的目的是逼对方把最关键的前提讲清楚。你要找到对方论点中最脆弱的地方，
 用精准的问题揭示它的漏洞。不要东拉西扯，聚焦就是力量。
 
-📨 对方（{other_name}）的开场立论要点如下：
-{other_summary}
+📨 对方（{other_name}）的完整开场立论原文如下：
+────────────────────────────────────────
+{other_full}
+────────────────────────────────────────
 
 📝 本轮你需要完成：
 - 只针对对方的定义、标准、主论点提出 **2-3 个关键问题**
@@ -100,8 +102,10 @@ ROUND_PROMPTS = {
 这是全场最核心的回合。你需要同时做三件事：回应对方的质询、主动攻击对方的漏洞、
 防守己方论点。最后把所有争议压缩到1-2个真正决定胜负的核心问题上。
 
-📨 对方（{other_name}）上一轮质询的核心内容：
-{other_summary}
+📨 对方（{other_name}）上一轮的完整质询原文如下：
+────────────────────────────────────────
+{other_full}
+────────────────────────────────────────
 
 📝 本轮你需要完成：
 1. **回应质询**：对方的问题暴露了你方哪些问题？逐一正面回应
@@ -121,8 +125,10 @@ ROUND_PROMPTS = {
 前三轮已经确定了核心争点。这一轮的目的是把它打透——不是发散，而是聚焦。
 你只能在已经确认的争点上正面交锋，把你方的论证打到最实、最深。
 
-📨 对方（{other_name}）在上一轮确认的核心论点：
-{other_summary}
+📨 对方（{other_name}）上一轮的完整发言原文如下：
+────────────────────────────────────────
+{other_full}
+────────────────────────────────────────
 
 📝 本轮你需要完成：
 - 明确说出：**我在回应哪一个核心争点**
@@ -141,8 +147,10 @@ ROUND_PROMPTS = {
   第一，完整回顾这场辩论说了什么——让裁判清楚地知道双方讨论的全貌；
   第二，清晰说明你最终为什么认为应该这样设计这个系统——这是你的核心判断。
 
-📨 对方（{other_name}）在上一轮的核心立场：
-{other_summary}
+📨 对方（{other_name}）上一轮的完整发言原文如下：
+────────────────────────────────────────
+{other_full}
+────────────────────────────────────────
 
 📝 本轮你必须按以下结构完成（不引入任何新论点）：
 
@@ -362,14 +370,13 @@ class SymposiumEngine:
             prompts: dict[str, str] = {}
             for i, client in enumerate(self.clients):
                 other = self.clients[(i + 1) % len(self.clients)]
-                other_ans = prev_answers.get(other.name, "")
-                other_summary = self._summarize_for_challenge(other.name, other_ans) if other_ans else ""
+                other_full = prev_answers.get(other.name, "（对方尚未发言）")
 
                 template = ROUND_PROMPTS.get(rnd, ROUND_PROMPTS[5])
                 p = template.format(
                     question=question,
                     other_name=other.name,
-                    other_summary=other_summary,
+                    other_full=other_full,   # full original text, no summarization
                 )
                 if user_guidance:
                     p = f"【裁判引导】{user_guidance}\n\n" + p
