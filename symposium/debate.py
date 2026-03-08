@@ -431,7 +431,7 @@ class SymposiumEngine:
         user_guidance = ""
 
         # ── Create .symposium/<ULID>/ session directory ───────────────────────
-        session_id = str(ulid.new())
+        session_id = str(ulid.ULID())
         self._session_dir = Path.home() / ".symposium" / session_id
         self._session_dir.mkdir(parents=True, exist_ok=True)
         self._log(f"\n📁 辩论记录目录: ~/.symposium/{session_id}/")
