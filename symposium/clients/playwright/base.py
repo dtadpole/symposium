@@ -11,6 +11,7 @@ Before every message, the client must try to enforce:
 
 from playwright.sync_api import Page
 from ..base import AIClient
+from .ui_agent import scan_ui, choose_action, recover_page, focus_best_input
 
 
 class PlaywrightChatClient(AIClient):
@@ -48,6 +49,13 @@ class PlaywrightChatClient(AIClient):
 
         # Mandatory: try to choose newest model + strongest thinking mode
         self.ensure_best_config()
+
+        # Recover page back to input-ready state if menus / overlays remain.
+        ui = scan_ui(self._page)
+        if ui.get("overlays"):
+            recover_page(self._page, ui)
+        else:
+            focus_best_input(self._page, ui)
 
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
         self._type_and_send(full_prompt)
