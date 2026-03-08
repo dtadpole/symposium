@@ -74,7 +74,13 @@ class ChatGPTClient(PlaywrightChatClient):
         self._page.wait_for_selector("#prompt-textarea", timeout=20000)
 
     def _upload_file(self, content: str, filename: str = "opponent_argument.txt") -> bool:
-        """Upload content as a file attachment to ChatGPT. Returns True if successful."""
+        """Upload content as a file attachment to ChatGPT. Returns True if successful.
+
+        Tested approach (confirmed working 2026-03-08):
+          1. Write content to temp .txt file
+          2. Find hidden file input and call set_input_files() directly
+          3. Wait for attachment icon to appear
+        """
         page = self._page
         try:
             # Write content to a temp file
@@ -87,37 +93,37 @@ class ChatGPTClient(PlaywrightChatClient):
             tmp_path = tmp.name
             tmp.close()
 
-            # Find the file upload button (paperclip / attach)
-            upload_btn = None
-            for sel in [
-                'button[aria-label="Attach files"]',
-                'button[aria-label="附加文件"]',
-                'button[data-testid="composer-attachment-button"]',
-                'label[for*="file"], input[type="file"]',
-            ]:
-                try:
-                    el = page.locator(sel).first
-                    if el.is_visible(timeout=1500):
-                        upload_btn = el
-                        break
-                except Exception:
-                    pass
-
-            if upload_btn is None:
-                return False
-
-            # Use set_input_files for file input, or click button
+            # Primary: set_input_files on hidden file input (confirmed working)
             file_input = page.locator('input[type="file"]').first
             if file_input.count() > 0:
                 file_input.set_input_files(tmp_path)
             else:
-                with page.expect_file_chooser() as fc_info:
-                    upload_btn.click()
-                fc = fc_info.value
-                fc.set_files(tmp_path)
+                # Fallback: find upload button and use file chooser
+                upload_btn = None
+                for sel in [
+                    'button[aria-label*="ile"]',       # "Attach files" / "附加文件"
+                    'button[aria-label*="ttach"]',
+                    'button[aria-label="Attach files"]',
+                    'button[aria-label="附加文件"]',
+                    'button[data-testid="composer-attachment-button"]',
+                ]:
+                    try:
+                        el = page.locator(sel).first
+                        if el.is_visible(timeout=1000):
+                            upload_btn = el
+                            break
+                    except Exception:
+                        pass
 
-            # Wait for upload indicator
-            page.wait_for_timeout(2000)
+                if upload_btn is None:
+                    return False
+
+                with page.expect_file_chooser(timeout=5000) as fc_info:
+                    upload_btn.click()
+                fc_info.value.set_files(tmp_path)
+
+            # Wait for attachment icon to appear
+            page.wait_for_timeout(2500)
 
             # Clean up temp file
             try:
