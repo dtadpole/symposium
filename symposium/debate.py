@@ -10,7 +10,11 @@ Flow:
 """
 
 import concurrent.futures
+import json
+import subprocess
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 from .clients.base import AIClient
 
@@ -107,10 +111,38 @@ class SymposiumEngine:
             print(msg)
 
     def _ask(self, client: AIClient, prompt: str, system: str | None = None) -> str:
+        """Sequential ask (used for analysis/synthesis with first client)."""
         try:
             return client.ask(prompt, system=system)
         except Exception as e:
             return f"[Error from {client.name}: {e}]"
+
+    def _run_subprocess(self, name: str, prompt: str, system: str | None) -> Round0Response:
+        """Run one client in a separate subprocess to avoid Playwright thread issues."""
+        runner = str(Path(__file__).parent / "runner.py")
+        arg = json.dumps({"name": name, "prompt": prompt, "system": system})
+        self._log(f"   → {name} 回答中（subprocess）...")
+        try:
+            r = subprocess.run(
+                [sys.executable, runner, arg],
+                capture_output=True, text=True, timeout=1200
+            )
+            if r.returncode == 0:
+                data = json.loads(r.stdout.strip().splitlines()[-1])
+                ans = data.get("answer", "[no answer]")
+            else:
+                ans = f"[{name} error: {r.stderr[-300:]}]"
+        except Exception as e:
+            ans = f"[{name} subprocess error: {e}]"
+        self._log(f"   ✓ {name} 完成 ({len(ans)} chars)")
+        return Round0Response(name, ans)
+
+    def _ask_parallel(self, tasks: list[tuple[str, str, str | None]]) -> list[Round0Response]:
+        """Run multiple clients in parallel subprocesses."""
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+            futs = [ex.submit(self._run_subprocess, name, prompt, system)
+                    for name, prompt, system in tasks]
+            return [f.result() for f in concurrent.futures.as_completed(futs)]
 
     def _ask_user(self, prompt: str) -> str:
         if self.user_input_fn:
@@ -171,33 +203,15 @@ class SymposiumEngine:
 
     def run(self, question: str) -> SymposiumResult:
 
-        # ── Round 0: init sequentially, then ask in parallel ─────────────────
-        self._log("⚗️  Round 0: 初始化各平台...")
-        for c in self.clients:
-            self._log(f"   init {c.name}...")
-            c._init_conversation()
-            c._initialized = True
-            c.ensure_best_config()
-            self._log(f"   ✓ {c.name} ready")
-
-        self._log("⚗️  Round 0: 三家 AI 并行发送问题...")
-        # Snapshot + send sequentially (page.goto already done), then wait in parallel
-        for c in self.clients:
-            c._type_and_send(question)
-            self._log(f"   ✓ {c.name} 问题已发送")
-
-        def _wait_one(client):
-            self._log(f"   → {client.name} 等待回复...")
-            ans = client._wait_for_response()
-            self._log(f"   ✓ {client.name} 完成 ({len(ans)} chars)")
-            return Round0Response(client.name, ans)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.clients)) as ex:
-            r0_map = {r.ai_name: r for r in ex.map(_wait_one, self.clients)}
-        round0 = [r0_map[c.name] for c in self.clients]
+        # ── Round 0: parallel subprocesses ────────────────────────────────────
+        self._log("⚗️  Round 0: 三家 AI 并行回答（subprocess）...")
+        round0 = self._ask_parallel(
+            [(c.name, question, None) for c in self.clients]
+        )
+        round0 = [r for r in sorted(round0, key=lambda r: [c.name for c in self.clients].index(r.ai_name))]
 
         # ── Compare after Round 0 ─────────────────────────────────────────────
-        self._log("🔍 分析共识与分歧...")
+        self._log("🔍 分析共识与分歧（Claude API）...")
         answers_r0 = [(r.ai_name, r.answer) for r in round0]
         consensus, disagreements, gaps, _ = self._compare(question, answers_r0)
 
@@ -233,19 +247,12 @@ class SymposiumEngine:
                 )
                 tasks.append((client, defender_client.name, challenge_prompt))
 
-            # Send all challenges sequentially, then wait in parallel
-            for client, defender_name, prompt in tasks:
-                client._type_and_send(prompt)
-                self._log(f"   {client.name} → 已发送挑战给 {defender_name}")
-
-            def _wait_challenge(args):
-                client, defender_name, _ = args
-                ch = client._wait_for_response()
-                self._log(f"   ✓ {client.name} 完成 ({len(ch)} chars)")
-                return (client.name, defender_name, ch)
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.clients)) as ex:
-                results = list(ex.map(_wait_challenge, tasks))
+            # Parallel subprocess challenges
+            challenge_inputs = [(client.name, prompt, CHALLENGE_SYSTEM) for client, _, prompt in tasks]
+            challenge_responses = self._ask_parallel(challenge_inputs)
+            cr_map = {r.ai_name: r.answer for r in challenge_responses}
+            results = [(client.name, defender_name, cr_map.get(client.name, "[no response]"))
+                       for client, defender_name, _ in tasks]
 
             for challenger_name, defender_name, challenge in results:
                 debate_exchanges.append(DebateExchange(
