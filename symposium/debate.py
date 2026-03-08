@@ -9,6 +9,7 @@ Flow:
   5. Synthesis — Final answer incorporating everything
 """
 
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Callable
 from .clients.base import AIClient
@@ -170,14 +171,22 @@ class SymposiumEngine:
 
     def run(self, question: str) -> SymposiumResult:
 
-        # ── Round 0 ───────────────────────────────────────────────────────────
-        self._log("⚗️  Round 0: 三家 AI 独立回答中...")
-        round0 = []
-        for c in self.clients:
-            self._log(f"   → {c.name} 回答中...")
-            ans = self._ask(c, question)
-            round0.append(Round0Response(c.name, ans))
-            self._log(f"   ✓ {c.name} 完成 ({len(ans)} chars)")
+        # ── Round 0: parallel ─────────────────────────────────────────────────
+        self._log("⚗️  Round 0: 三家 AI 并行回答中...")
+        def _ask_one_r0(client):
+            self._log(f"   → {client.name} 回答中...")
+            ans = self._ask(client, question)
+            self._log(f"   ✓ {client.name} 完成 ({len(ans)} chars)")
+            return Round0Response(client.name, ans)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.clients)) as ex:
+            futs = {ex.submit(_ask_one_r0, c): c for c in self.clients}
+            r0_map = {}
+            for fut in concurrent.futures.as_completed(futs):
+                r = fut.result()
+                r0_map[r.ai_name] = r
+        # preserve original client order
+        round0 = [r0_map[c.name] for c in self.clients]
 
         # ── Compare after Round 0 ─────────────────────────────────────────────
         self._log("🔍 分析共识与分歧...")
@@ -201,11 +210,12 @@ class SymposiumEngine:
         current_answers = {r.ai_name: r.answer for r in round0}
 
         for rnd in range(self.debate_rounds):
-            self._log(f"   第 {rnd+1} 轮...")
+            self._log(f"   第 {rnd+1} 轮（并行）...")
+            # Build all challenge tasks for this round simultaneously
+            tasks = []
             for i, client in enumerate(self.clients):
                 defender_client = self.clients[(i + 1) % len(self.clients)]
                 defender_ans = current_answers.get(defender_client.name, "")
-
                 challenge_prompt = (
                     f"原始问题: {question}\n\n"
                     f"{defender_client.name} 的回答:\n{defender_ans}\n\n"
@@ -213,19 +223,29 @@ class SymposiumEngine:
                     ("\n\n用户（裁判）的引导:\n" + user_guidance_r0 if user_guidance_r0 else "") +
                     f"\n\n请从你自己的视角挑战 {defender_client.name} 的观点，要具体、工程化。"
                 )
-                self._log(f"   {client.name} → 挑战 {defender_client.name}...")
-                challenge = self._ask(client, challenge_prompt, system=CHALLENGE_SYSTEM)
-                self._log(f"   ✓ {client.name} 完成 ({len(challenge)} chars)")
+                tasks.append((client, defender_client.name, challenge_prompt))
 
+            def _do_challenge(args):
+                client, defender_name, prompt = args
+                self._log(f"   {client.name} → 挑战 {defender_name}...")
+                ch = self._ask(client, prompt, system=CHALLENGE_SYSTEM)
+                self._log(f"   ✓ {client.name} 完成 ({len(ch)} chars)")
+                return (client.name, defender_name, ch)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.clients)) as ex:
+                results = list(ex.map(_do_challenge, tasks))
+
+            for challenger_name, defender_name, challenge in results:
                 debate_exchanges.append(DebateExchange(
-                    challenger=client.name,
-                    defender=defender_client.name,
+                    challenger=challenger_name,
+                    defender=defender_name,
                     round_num=rnd + 1,
                     user_guidance=user_guidance_r0,
                     challenge=challenge,
                 ))
-                current_answers[defender_client.name] = (
-                    f"{defender_ans}\n\n[{client.name} 挑战后]:\n{challenge}"
+                old = current_answers.get(defender_name, "")
+                current_answers[defender_name] = (
+                    f"{old}\n\n[{challenger_name} 挑战后]:\n{challenge}"
                 )
 
         # ── Compare after debate ───────────────────────────────────────────────
