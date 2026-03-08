@@ -171,21 +171,29 @@ class SymposiumEngine:
 
     def run(self, question: str) -> SymposiumResult:
 
-        # ── Round 0: parallel ─────────────────────────────────────────────────
-        self._log("⚗️  Round 0: 三家 AI 并行回答中...")
-        def _ask_one_r0(client):
-            self._log(f"   → {client.name} 回答中...")
-            ans = self._ask(client, question)
+        # ── Round 0: init sequentially, then ask in parallel ─────────────────
+        self._log("⚗️  Round 0: 初始化各平台...")
+        for c in self.clients:
+            self._log(f"   init {c.name}...")
+            c._init_conversation()
+            c._initialized = True
+            c.ensure_best_config()
+            self._log(f"   ✓ {c.name} ready")
+
+        self._log("⚗️  Round 0: 三家 AI 并行发送问题...")
+        # Snapshot + send sequentially (page.goto already done), then wait in parallel
+        for c in self.clients:
+            c._type_and_send(question)
+            self._log(f"   ✓ {c.name} 问题已发送")
+
+        def _wait_one(client):
+            self._log(f"   → {client.name} 等待回复...")
+            ans = client._wait_for_response()
             self._log(f"   ✓ {client.name} 完成 ({len(ans)} chars)")
             return Round0Response(client.name, ans)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.clients)) as ex:
-            futs = {ex.submit(_ask_one_r0, c): c for c in self.clients}
-            r0_map = {}
-            for fut in concurrent.futures.as_completed(futs):
-                r = fut.result()
-                r0_map[r.ai_name] = r
-        # preserve original client order
+            r0_map = {r.ai_name: r for r in ex.map(_wait_one, self.clients)}
         round0 = [r0_map[c.name] for c in self.clients]
 
         # ── Compare after Round 0 ─────────────────────────────────────────────
@@ -225,15 +233,19 @@ class SymposiumEngine:
                 )
                 tasks.append((client, defender_client.name, challenge_prompt))
 
-            def _do_challenge(args):
-                client, defender_name, prompt = args
-                self._log(f"   {client.name} → 挑战 {defender_name}...")
-                ch = self._ask(client, prompt, system=CHALLENGE_SYSTEM)
+            # Send all challenges sequentially, then wait in parallel
+            for client, defender_name, prompt in tasks:
+                client._type_and_send(prompt)
+                self._log(f"   {client.name} → 已发送挑战给 {defender_name}")
+
+            def _wait_challenge(args):
+                client, defender_name, _ = args
+                ch = client._wait_for_response()
                 self._log(f"   ✓ {client.name} 完成 ({len(ch)} chars)")
                 return (client.name, defender_name, ch)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.clients)) as ex:
-                results = list(ex.map(_do_challenge, tasks))
+                results = list(ex.map(_wait_challenge, tasks))
 
             for challenger_name, defender_name, challenge in results:
                 debate_exchanges.append(DebateExchange(
