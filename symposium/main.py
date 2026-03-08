@@ -1,66 +1,56 @@
 #!/usr/bin/env python3
 """
-Symposium CLI — ask once, let the AIs debate.
+Symposium CLI — ask once, let the AIs debate via browser.
 
 Usage:
-  python -m symposium.main "your question here"
-  python -m symposium.main  # interactive mode
+  python -m symposium.main "your question"
+  python -m symposium.main          # interactive mode
+  python -m symposium.main --rounds 2 "..."
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-from .config import available_clients
-from .clients.claude import ClaudeClient
-from .clients.gemini import GeminiClient
-from .clients import GPTClient
+sys.path.insert(0, str(Path.home() / "skill-foundry"))
+
+from tools.stealth_browser.browser import StealthBrowser
+from .clients.playwright import ChatGPTClient, ClaudeWebClient, GeminiWebClient
 from .debate import SymposiumEngine
 from .output import print_result, save_markdown
 
-# Default Obsidian output folder
+STORAGE_FILE = str(Path.home() / ".playwright-stealth/storage/session.json")
 DEFAULT_OUTPUT = Path.home() / "Documents/Synced Vault #1/AI Chats/Symposium"
-
-
-def build_clients():
-    clients = []
-    available = available_clients()
-
-    if "claude" in available:
-        try:
-            clients.append(ClaudeClient())
-            print("  ✓ Claude")
-        except Exception as e:
-            print(f"  ✗ Claude: {e}")
-
-    if "gemini" in available:
-        try:
-            clients.append(GeminiClient())
-            print("  ✓ Gemini")
-        except Exception as e:
-            print(f"  ✗ Gemini: {e}")
-
-    if "gpt" in available and GPTClient is not None:
-        try:
-            clients.append(GPTClient())
-            print("  ✓ GPT")
-        except Exception as e:
-            print(f"  ✗ GPT: {e}")
-
-    return clients
 
 
 def run(question: str, save: bool = True, debate_rounds: int = 1):
     print("\n🏛  Symposium is convening...\n")
-    print("Participants:")
-    clients = build_clients()
+    print("Opening browser (headless=False, stealth mode)...")
 
-    if len(clients) < 2:
-        print("\n❌ Need at least 2 configured AI clients. Check your API keys.")
-        sys.exit(1)
+    with StealthBrowser(session_path=STORAGE_FILE) as sb:
+        # Each AI gets its own page (tab) — conversations stay independent
+        print("  📄 Opening page for Claude...")
+        page_claude = sb.new_page()
 
-    engine = SymposiumEngine(clients, debate_rounds=debate_rounds)
-    result = engine.run(question, verbose_callback=lambda m: print(f"\n{m}"))
+        print("  📄 Opening page for ChatGPT...")
+        page_gpt = sb.new_page()
+
+        print("  📄 Opening page for Gemini...")
+        page_gemini = sb.new_page()
+
+        clients = [
+            ClaudeWebClient(page_claude),
+            ChatGPTClient(page_gpt),
+            GeminiWebClient(page_gemini),
+        ]
+
+        print(f"\n✓ 3 AI participants ready: {', '.join(c.name for c in clients)}\n")
+
+        engine = SymposiumEngine(clients, debate_rounds=debate_rounds)
+        result = engine.run(
+            question,
+            verbose_callback=lambda m: print(f"\n{m}")
+        )
 
     print_result(result)
 
@@ -73,7 +63,7 @@ def run(question: str, save: bool = True, debate_rounds: int = 1):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="🏛 Symposium — Multi-AI debate engine"
+        description="🏛 Symposium — Multi-AI debate engine (browser-based)"
     )
     parser.add_argument("question", nargs="?", help="Question to debate")
     parser.add_argument("--no-save", action="store_true", help="Don't save to Obsidian")
@@ -82,7 +72,7 @@ def main():
 
     question = args.question
     if not question:
-        print("🏛  Symposium — Multi-AI Debate Engine")
+        print("🏛  Symposium — Multi-AI Debate Engine (browser mode)")
         print("Enter your question (or Ctrl+C to exit):\n")
         try:
             question = input("> ").strip()

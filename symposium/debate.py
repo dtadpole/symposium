@@ -84,13 +84,10 @@ class SymposiumEngine:
             return f"[Error from {client.name}: {e}]"
 
     def _ask_all_concurrent(self, prompt: str, system: str | None = None) -> list[tuple[str, str]]:
-        """Ask all clients the same question concurrently. Returns [(name, answer), ...]"""
-        with concurrent.futures.ThreadPoolExecutor() as ex:
-            futures = {ex.submit(self._ask, c, prompt, system): c for c in self.clients}
-            results = []
-            for fut, client in futures.items():
-                results.append((client.name, fut.result()))
-        return results
+        """Ask all clients the same question.
+        Playwright pages are not thread-safe, so we run sequentially.
+        """
+        return [(c.name, self._ask(c, prompt, system)) for c in self.clients]
 
     def _parse_consensus(self, analysis: str) -> tuple[list[str], list[str]]:
         """Parse the consensus analysis into (consensus_points, disagreement_topics)."""
