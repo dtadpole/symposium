@@ -69,6 +69,17 @@ USER_GUIDANCE_TMPL = """用户（裁判）对本轮讨论有以下引导：
 
 请结合以上引导，对你的方案进行回应和补充。"""
 
+CONCLUSION_TMPL = """【格式要求】所有回答必须直接写在对话主回复中，不要创建任何文档、artifact 或附件。
+
+经过多轮辩论，请给出你自己的最终结论：
+
+1. 你认为这个自我演化知识库系统最终应该怎么设计？（工程结构 + 演化机制）
+2. 你在这轮辩论中改变了哪些最初的想法？为什么？
+3. 你认为对方（{other_name}）哪些观点是正确的、值得采纳的？
+4. 你坚持认为对方哪些观点是错的或不足的？
+
+请给出你的最终立场，具体、坚定、有理由。"""
+
 SYNTHESIS_SYSTEM = """You are the final synthesizer in a multi-AI debate.
 Given the full debate history, produce the single best answer.
 Be concrete, engineering-grade, and definitive."""
@@ -347,6 +358,50 @@ class SymposiumEngine:
             rr.user_guidance = guidance
             if guidance:
                 self._log(f"👤 用户引导: {guidance}")
+
+        # ── Final conclusions: each AI states their own position ──────────────
+        self._log("\n🎯 最终结论轮：各方陈述最终立场...")
+        conclusion_answers: dict[str, str] = {}
+        for i, client in enumerate(self.clients):
+            other = self.clients[(i + 1) % len(self.clients)]
+            conclusion_prompt = CONCLUSION_TMPL.format(other_name=other.name)
+            self._log(f"   ✉️  {client.name} 陈述最终结论...")
+            try:
+                client._type_and_send(conclusion_prompt)
+            except Exception as e:
+                self._log(f"   ⚠️  {client.name} 发送失败: {e}")
+
+        self._log("   ⏳ 等待各方最终结论...")
+        start_c = time.time()
+        pending_c = {c.name: c for c in self.clients}
+        while pending_c and (time.time() - start_c) < 900:
+            from .clients.playwright.response_waiter import check_done, extract_reply_after_anchor
+            for name in list(pending_c.keys()):
+                c = pending_c[name]
+                try:
+                    if check_done(c._page, c.name):
+                        ans = extract_reply_after_anchor(c._page, c.name, CONCLUSION_TMPL[:100])
+                        if not ans:
+                            ans = c._wait_for_response()
+                        conclusion_answers[name] = ans
+                        self._log(f"   ✓ {name} 结论完成 ({len(ans)} chars)")
+                        del pending_c[name]
+                except Exception as e:
+                    self._log(f"   ⚠️  {name} 出错: {e}")
+            if pending_c:
+                time.sleep(15)
+
+        conclusion_round = RoundResult(round_num=999, answers=conclusion_answers)
+        all_rounds.append(conclusion_round)
+
+        # Print conclusions
+        sep = "=" * 60
+        self._log(f"\n{sep}")
+        self._log("🎯 各方最终结论")
+        self._log(sep)
+        for name, ans in conclusion_answers.items():
+            self._log(f"\n── {name} 的最终结论 ──")
+            self._log(ans)
 
         # ── Synthesis ─────────────────────────────────────────────────────────
         self._log("\n✨ 最终综合（API）...")
