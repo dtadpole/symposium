@@ -3,11 +3,40 @@
 import time
 import random
 from .base import PlaywrightChatClient
+from .chooser import choose_best
 
 
 class ClaudeWebClient(PlaywrightChatClient):
     name = "Claude"
     start_url = "https://claude.ai/new"
+
+    def ensure_best_config(self):
+        page = self._page
+        try:
+            btn = page.locator('[data-testid="model-selector-dropdown"]').first
+            current = btn.inner_text(timeout=2000).strip()
+            btn.click(timeout=3000)
+            page.wait_for_timeout(1200)
+            options = page.evaluate('''() => [...document.querySelectorAll('[role="menuitem"],button,[role="option"]')]
+                .map(el => (el.innerText||el.textContent||'').trim())
+                .filter(Boolean)
+                .filter(t => t.length < 120)
+                .slice(0,120)''')
+            choice = choose_best('Claude', current, options)
+
+            # click chosen model
+            for target in [choice.get('target_model',''), choice.get('target_mode','')]:
+                if not target:
+                    continue
+                try:
+                    el = page.locator(f'button:has-text("{target}")').first
+                    if el.is_visible(timeout=1000):
+                        el.click(timeout=2000)
+                        page.wait_for_timeout(700)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _human_move(self):
         """Simulate brief human-like mouse movement."""
@@ -109,26 +138,64 @@ class ClaudeWebClient(PlaywrightChatClient):
 
     def _wait_for_response(self) -> str:
         page = self._page
-        # Wait for streaming to start
         try:
             page.wait_for_selector('[data-is-streaming="true"]', timeout=15000)
         except Exception:
             pass
-        # Wait for streaming to end
         try:
             page.wait_for_selector('[data-is-streaming="true"]', state='hidden', timeout=120000)
         except Exception:
             pass
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1200)
 
+        # Try known selectors first
         for sel in [
             '[data-testid="assistant-message"]',
             '.font-claude-message',
             'article',
             '[class*="assistant"]',
         ]:
-            msgs = page.locator(sel).all()
-            if msgs:
-                return msgs[-1].inner_text().strip()
+            try:
+                msgs = page.locator(sel).all()
+                texts = []
+                for m in msgs:
+                    t = m.inner_text().strip()
+                    if not t:
+                        continue
+                    if t.startswith(('Sonnet', 'Opus', 'Haiku')):
+                        continue
+                    if t == 'Share':
+                        continue
+                    texts.append(t)
+                if texts:
+                    return texts[-1]
+            except Exception:
+                pass
+
+        # Heuristic fallback: pick the last visible non-UI text block
+        try:
+            text = page.evaluate('''() => {
+                const blacklist = [
+                    'Open sidebar','Recents','Share','Write','Learn','Code','Life stuff','From Drive',
+                    'Claude is AI and can make mistakes. Please double-check responses.'
+                ];
+                const vals = [];
+                document.querySelectorAll('*').forEach(el => {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    const r = el.getBoundingClientRect();
+                    if (!t || r.width <= 0 || r.height <= 0) return;
+                    if (t.length > 4000) return;
+                    if (blacklist.includes(t)) return;
+                    if (/^(Sonnet|Opus|Haiku)\b/.test(t)) return;
+                    vals.push(t);
+                });
+                // dedupe preserving order
+                const uniq = [...new Map(vals.map(v => [v, v])).values()];
+                return uniq.length ? uniq[uniq.length - 1] : '';
+            }''')
+            if text:
+                return text.strip()
+        except Exception:
+            pass
 
         return "[Claude: could not extract response]"
