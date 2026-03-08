@@ -143,23 +143,26 @@ def _is_stable(snap: dict) -> bool:
 
 
 def _scroll_to_bottom(page):
-    """Scroll the main conversation area to bottom to reveal full response + feedback buttons."""
+    """Scroll ALL scrollable conversation containers to bottom."""
     try:
         page.evaluate(
             '''() => {
-              // Try conversation scroll container first, fall back to window
-              const scrollable = (
-                document.querySelector('[data-testid="conversation-turn-list"]') ||
-                document.querySelector('main') ||
-                document.querySelector('.overflow-y-auto') ||
-                document.documentElement
-              );
-              scrollable.scrollTo({ top: scrollable.scrollHeight, behavior: 'smooth' });
+              // Find all large scrollable containers and scroll them all
+              const candidates = [...document.querySelectorAll('*')].filter(el => {
+                const s = window.getComputedStyle(el);
+                const ov = s.overflowY;
+                if (ov !== 'auto' && ov !== 'scroll') return false;
+                const r = el.getBoundingClientRect();
+                return r.width > 200 && r.height > 200 && el.scrollHeight > el.clientHeight;
+              });
+              candidates.forEach(el => {
+                el.scrollTop = el.scrollHeight;
+              });
               // Also scroll window
-              window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+              window.scrollTo(0, document.body.scrollHeight);
             }'''
         )
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(500)
     except Exception:
         pass
 
@@ -176,13 +179,13 @@ def wait_for_completion(page, platform: str, baseline_snap: dict) -> str:
     # Give a moment for the stop button to appear
     page.wait_for_timeout(1500)
 
-    scroll_interval = 0  # scroll every ~3 polls
+    scroll_interval = 0  # scroll every ~10 polls = ~15s
     while True:
         elapsed = time.time() - start
 
-        # Scroll to bottom periodically so long responses + feedback buttons are visible
+        # Scroll to bottom every ~15s so long responses + feedback buttons are visible
         scroll_interval += 1
-        if scroll_interval % 3 == 0:
+        if scroll_interval % 10 == 0:
             _scroll_to_bottom(page)
 
         snap = _page_state_snapshot(page, platform)
