@@ -42,16 +42,40 @@ PLATFORM_HINTS = {
         "stop_sels": ['[aria-label="Stop"]', 'button:has-text("Stop")'],
         "thinking_sels": ['[data-is-streaming="true"]', '.loading'],
         "send_sels": ['button[aria-label="Send message"]', '[data-testid="send-button"]'],
+        # Feedback buttons appear only after output is fully complete
+        "done_sels": [
+            'button[aria-label="Thumbs up"]',
+            'button[aria-label="Thumbs down"]',
+            '[data-testid="thumbs-up"]',
+            '[data-testid="thumbs-down"]',
+            'button[aria-label="Copy response"]',
+        ],
     },
     "ChatGPT": {
         "stop_sels": ['[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]'],
         "thinking_sels": ['[data-testid="stop-button"]'],
         "send_sels": ['[data-testid="send-button"]', 'button[aria-label="Send prompt"]'],
+        "done_sels": [
+            'button[aria-label="Good response"]',
+            'button[aria-label="Bad response"]',
+            '[data-testid="good-response-turn-action-button"]',
+            '[data-testid="bad-response-turn-action-button"]',
+            'button[aria-label="Copy"]',
+        ],
     },
     "Gemini": {
         "stop_sels": ['button[aria-label="Stop response"]', 'button[mattooltip="Stop response"]'],
         "thinking_sels": ['.loading-indicator', '[aria-label="Gemini is thinking"]'],
         "send_sels": ['button[aria-label="Send message"]', 'button[mattooltip="Send message"]'],
+        "done_sels": [
+            'button[aria-label="Good response"]',
+            'button[aria-label="Bad response"]',
+            'button[mattooltip="Good response"]',
+            'button[mattooltip="Bad response"]',
+            'button[aria-label="Thumb up"]',
+            'button[aria-label="Thumb down"]',
+            'button[aria-label="Copy"]',
+        ],
     },
 }
 
@@ -71,8 +95,9 @@ def _page_state_snapshot(page, platform: str) -> dict[str, Any]:
     stop_visible = _el_exists(page, hints["stop_sels"])
     thinking_visible = _el_exists(page, hints["thinking_sels"])
     send_visible = _el_exists(page, hints["send_sels"])
+    # Feedback/rating buttons are the strongest "done" signal
+    done_visible = _el_exists(page, hints.get("done_sels", []))
 
-    # count visible text in main content area
     try:
         text_len = page.evaluate(
             '''() => {
@@ -88,6 +113,7 @@ def _page_state_snapshot(page, platform: str) -> dict[str, Any]:
         "stop_visible": stop_visible,
         "thinking_visible": thinking_visible,
         "send_visible": send_visible,
+        "done_visible": done_visible,
         "text_len": text_len,
     }
 
@@ -97,17 +123,47 @@ def _state_changed(a: dict, b: dict) -> bool:
         a.get("stop_visible") != b.get("stop_visible") or
         a.get("thinking_visible") != b.get("thinking_visible") or
         a.get("send_visible") != b.get("send_visible") or
+        a.get("done_visible") != b.get("done_visible") or
         abs((a.get("text_len") or 0) - (b.get("text_len") or 0)) > 30
     )
 
 
 def _is_stable(snap: dict) -> bool:
-    """Page is done when send button is visible and stop/thinking are gone."""
+    """Page is done when:
+    1. Feedback/rating buttons appeared (strongest signal), OR
+    2. Send button visible + stop/thinking gone
+    """
+    # Primary: feedback buttons appeared = output definitely finished
+    if snap.get("done_visible"):
+        return True
+    # Secondary: send restored, stop gone, thinking gone
     return (
         snap.get("send_visible", False) and
         not snap.get("stop_visible", False) and
         not snap.get("thinking_visible", False)
     )
+
+
+def _scroll_to_bottom(page):
+    """Scroll the main conversation area to bottom to reveal full response + feedback buttons."""
+    try:
+        page.evaluate(
+            '''() => {
+              // Try conversation scroll container first, fall back to window
+              const scrollable = (
+                document.querySelector('[data-testid="conversation-turn-list"]') ||
+                document.querySelector('main') ||
+                document.querySelector('.overflow-y-auto') ||
+                document.documentElement
+              );
+              scrollable.scrollTo({ top: scrollable.scrollHeight, behavior: 'smooth' });
+              // Also scroll window
+              window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+            }'''
+        )
+        page.wait_for_timeout(600)
+    except Exception:
+        pass
 
 
 def wait_for_completion(page, platform: str, baseline_snap: dict) -> str:
@@ -122,8 +178,15 @@ def wait_for_completion(page, platform: str, baseline_snap: dict) -> str:
     # Give a moment for the stop button to appear
     page.wait_for_timeout(1500)
 
+    scroll_interval = 0  # scroll every ~3 polls
     while True:
         elapsed = time.time() - start
+
+        # Scroll to bottom periodically so long responses + feedback buttons are visible
+        scroll_interval += 1
+        if scroll_interval % 3 == 0:
+            _scroll_to_bottom(page)
+
         snap = _page_state_snapshot(page, platform)
 
         if _state_changed(last_snap, snap):
@@ -131,11 +194,15 @@ def wait_for_completion(page, platform: str, baseline_snap: dict) -> str:
             last_snap = snap
 
         if _is_stable(snap) and elapsed > 2:
+            # One final scroll to make sure everything is rendered
+            _scroll_to_bottom(page)
+            page.wait_for_timeout(400)
             return "stable"
 
         since_change = time.time() - last_change_ts
 
         if elapsed > HARD_TIMEOUT_S:
+            _scroll_to_bottom(page)
             return "timeout"
 
         if since_change > REFRESH_TIMEOUT_S:
@@ -147,7 +214,6 @@ def wait_for_completion(page, platform: str, baseline_snap: dict) -> str:
             return "refreshed"
 
         if since_change > STUCK_TIMEOUT_S and elapsed > STUCK_TIMEOUT_S:
-            # suspected stuck — try reload
             try:
                 page.reload(wait_until="domcontentloaded", timeout=30000)
                 page.wait_for_timeout(3000)
@@ -289,6 +355,9 @@ def _llm_pick_reply(platform: str, candidates: list[dict]) -> str:
 
 def extract_reply_after_anchor(page, platform: str, prompt: str) -> str:
     """Main entry: find user message anchor, collect blocks after it, LLM clean reply."""
+    # Scroll to bottom first so long responses are fully in DOM
+    _scroll_to_bottom(page)
+    page.wait_for_timeout(500)
     blocks = _scan_message_blocks(page)
     anchor_idx = _find_anchor(blocks, prompt)
 
