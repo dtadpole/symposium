@@ -310,8 +310,31 @@ class SymposiumEngine:
             except Exception as e:
                 self._log(f"   ⚠️  {c.name} 发送失败: {e}")
 
-    def _wait_all(self, hint_prompt: str = "") -> dict[str, str]:
-        """Poll all pages until each is done."""
+    def _wait_until_text_stable(self, page, platform: str, patience: int = 3) -> None:
+        """After done signal, wait until text_len stops changing for `patience` consecutive checks."""
+        from .clients.playwright.response_waiter import _page_state_snapshot
+        prev_len = 0
+        stable_count = 0
+        for _ in range(20):  # max 20 × 1.5s = 30s extra
+            time.sleep(1.5)
+            snap = _page_state_snapshot(page, platform)
+            cur_len = snap.get("text_len", 0)
+            if cur_len == prev_len:
+                stable_count += 1
+                if stable_count >= patience:
+                    return
+            else:
+                stable_count = 0
+            prev_len = cur_len
+
+    def _wait_all(self, hint_prompt: str = "", round_num: int = 0) -> dict[str, str]:
+        """Poll all pages until each is done.
+
+        After check_done() signals completion:
+          1. Wait until text_len is fully stable (no more streaming)
+          2. Extract full response
+          3. Save to ~/Symposium/output/rounds/R{n}_{name}.txt
+        """
         self._log("   ⏳ 等待各方回复（轮询中）...")
         start = time.time()
         pending = {c.name: c for c in self.clients}
@@ -322,10 +345,20 @@ class SymposiumEngine:
                 c = pending[name]
                 try:
                     if check_done(c._page, c.name):
+                        # Wait for text to fully stop streaming before extracting
+                        self._log(f"   🔄 {name} 完成信号收到，等待文字流式结束...")
+                        self._wait_until_text_stable(c._page, c.name, patience=3)
+
                         ans = extract_reply_after_anchor(c._page, c.name,
                                                          getattr(c, '_last_prompt', hint_prompt))
                         if not ans:
                             ans = c._wait_for_response()
+
+                        # Save full response to file immediately
+                        if ans and round_num > 0:
+                            saved = self._save_round_content(round_num, name, ans)
+                            self._log(f"   💾 {name} 完整回复已保存 ({len(ans)} 字符): {saved}")
+
                         results[name] = ans
                         self._log(f"   ✓ {name} 完成 ({len(ans)} chars)")
                         del pending[name]
@@ -339,7 +372,10 @@ class SymposiumEngine:
         for name, c in pending.items():
             self._log(f"   ⏰ {name} 超时，强制提取...")
             try:
-                results[name] = c._wait_for_response()
+                ans = c._wait_for_response()
+                if ans and round_num > 0:
+                    self._save_round_content(round_num, name, ans)
+                results[name] = ans
             except Exception as e:
                 results[name] = f"[{name} timeout: {e}]"
         return results
@@ -397,7 +433,7 @@ class SymposiumEngine:
 
             # Send all + wait all
             self._send_all(prompts, round_num=rnd)
-            answers = self._wait_all()
+            answers = self._wait_all(round_num=rnd)
 
             # API round analysis
             analysis = self._api_round_analysis(rnd, answers)
