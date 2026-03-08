@@ -53,12 +53,13 @@ PLATFORM_HINTS = {
         "stop_sels": ['[data-testid="stop-button"]', 'button[aria-label="Stop streaming"]'],
         "thinking_sels": ['[data-testid="stop-button"]'],
         "send_sels": ['[data-testid="send-button"]', 'button[aria-label="Send prompt"]'],
+        # NOTE: do NOT include 'button[aria-label="Copy"]' here —
+        # that button persists on ALL previous messages and fires false positives.
         "done_sels": [
             'button[aria-label="Good response"]',
             'button[aria-label="Bad response"]',
             '[data-testid="good-response-turn-action-button"]',
             '[data-testid="bad-response-turn-action-button"]',
-            'button[aria-label="Copy"]',
         ],
     },
     "Gemini": {

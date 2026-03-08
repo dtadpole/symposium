@@ -375,13 +375,29 @@ class SymposiumEngine:
         pending = {c.name: c for c in self.clients}
         results: dict[str, str] = {}
 
+        # Phase-1 gate: track which clients have been seen actively generating
+        # (stop button appeared). Prevents false "done" from stale signals on
+        # previous conversation turns (e.g. ChatGPT Copy button always present).
+        _seen_generating: set[str] = set()
+
         while pending and (time.time() - start) < HARD_TIMEOUT:
             for name in list(pending.keys()):
                 c = pending[name]
                 try:
+                    from .clients.playwright.response_waiter import _el_exists, PLATFORM_HINTS as _PH
+                    stop_sels = _PH.get(c.name, {}).get("stop_sels", [])
+
+                    # Phase 1: must first see stop-button (= client is generating)
+                    if name not in _seen_generating:
+                        if _el_exists(c._page, stop_sels):
+                            _seen_generating.add(name)
+                            self._log(f"   🟡 {name} 已开始生成...")
+                        continue  # don't check done until we've seen it start
+
+                    # Phase 2: stop-button gone + text stable = truly done
                     if check_done(c._page, c.name):
                         self._log(f"   🔄 {name} 完成信号收到，等待流式输出完全停止...")
-                        self._wait_until_text_stable(c._page, c.name, patience=3)
+                        self._wait_until_text_stable(c._page, c.name, patience=5)
                         self._log(f"   ✔  {name} 文字已稳定，开始提取...")
 
                         ans = extract_reply_after_anchor(
