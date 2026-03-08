@@ -1,34 +1,34 @@
 """
-Symposium Debate Engine — context-preserving multi-round debate.
+Symposium Debate Engine — 6-round structured debate.
+
+Round structure:
+  0 (R1): Opening statement — position, 2 core arguments, key disputes
+  1 (R2): Focused questioning — 2-3 questions on opponent's premises
+  2 (R3): Framework attack — challenge definitions and judgment standards
+  3 (R4): Substantive attack — attack core arguments, compress to 1-2 deciding questions
+  4 (R5): Focused free debate — only on established core disputes
+  5 (R6): Closing statement — why my side wins
 
 Architecture:
-- 3 browser pages opened ONCE at startup and kept alive throughout
-- Each round sends follow-up messages in the SAME conversation (full context)
-- Analysis / summarization via Claude API (fast, no browser needed)
-- Sequential send + sequential wait (Playwright is greenlet-bound)
-- User acts as judge between rounds
-
-Flow per round:
-  send C1 → wait C1 → send C2 → wait C2 → send C3 → wait C3
-  → API summarize → show user → get user guidance → next round
+  - 2 browser clients opened ONCE, kept alive throughout
+  - Pipeline: send sequentially (fast), poll all pages until done
+  - Analysis/summary via Anthropic API
+  - Opponent answer summarized to key points before sending as challenge
 """
 
 from __future__ import annotations
 
-import json
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
 import anthropic
-
-import time
 
 from .clients.base import AIClient
 from .clients.playwright.response_waiter import check_done, extract_reply_after_anchor
 
 
 def _load_openclaw_anthropic() -> tuple[str | None, str]:
-    """Load API key + model from OpenClaw config. Falls back to env / defaults."""
     import os, json as _json
     from pathlib import Path as _Path
     key = os.environ.get("ANTHROPIC_API_KEY")
@@ -37,52 +37,98 @@ def _load_openclaw_anthropic() -> tuple[str | None, str]:
         p = _Path.home() / ".openclaw/agents/main/agent/auth-profiles.json"
         data = _json.loads(p.read_text())
         key = key or data["profiles"]["anthropic:default"]["token"]
-        # model from openclaw config if present
         model = data.get("defaultModel", model).replace("anthropic/", "")
     except Exception:
         pass
     return key, model
 
-# ── Prompts ────────────────────────────────────────────────────────────────────
 
-# Prepended to EVERY message sent to any AI
+# ── Format rule prepended to every AI prompt ──────────────────────────────────
+
 REPLY_FORMAT_RULE = (
-    "【重要格式要求】请将你的完整回答直接写在对话主回复中，"
-    "不要创建任何文档、artifact、代码块外的独立文件或附件。"
-    "所有内容必须在这条消息的正文里。\n\n"
+    "【格式要求】请将你的完整回答直接写在对话主回复中，"
+    "不要创建任何文档、artifact 或附件。所有内容必须在这条消息的正文里。\n\n"
 )
 
-CHALLENGE_TMPL = """{other_name} 对你之前的方案提出了以下观点：
+# ── Round prompts ──────────────────────────────────────────────────────────────
 
-{other_answer}
+ROUND_PROMPTS = {
+    1: """【第1轮：开场立论与框架确认】
 
-请基于你在这次对话中已有的方案，回应 {other_name} 的观点：
-1. 指出 {other_name} 方案中的优点和你认同的地方
-2. 指出 {other_name} 方案中的不足或你不同意的地方
-3. 结合 {other_name} 的挑战，对你自己的方案进行具体的改进或补充
+辩题：{question}
 
-请保持工程化和具体，不要只给大框架。"""
+请完成以下内容（最多2个主论点，不要铺太多）：
 
-USER_GUIDANCE_TMPL = """用户（裁判）对本轮讨论有以下引导：
+1. **明确立场**：你方的核心主张是什么？
+2. **判断标准**：你认为应按什么标准判断这场辩论的输赢？
+3. **2个核心论点**：支撑你立场的最重要的2个论点
+4. **核心争点**：你认为本场真正的焦点是什么？（1-2个）
 
-{guidance}
+规则：必须说清楚判断标准和本场焦点，为后续讨论锁定赛道。""",
 
-请结合以上引导，对你的方案进行回应和补充。"""
+    2: """【第2轮：聚焦质询】
 
-CONCLUSION_TMPL = """【格式要求】所有回答必须直接写在对话主回复中，不要创建任何文档、artifact 或附件。
+对方（{other_name}）的开场立论要点如下：
+{other_summary}
 
-经过多轮辩论，请给出你自己的最终结论：
+请只针对对方的定义、标准、主论点提出 2-3 个关键问题：
+- 问题要简短，直指前提、因果链、适用范围或例外条件
+- 不要东拉西扯，不要开新论点
+- 每个问题后说明：你认为这是对方的薄弱点
 
-1. 你认为这个自我演化知识库系统最终应该怎么设计？（工程结构 + 演化机制）
-2. 你在这轮辩论中改变了哪些最初的想法？为什么？
-3. 你认为对方（{other_name}）哪些观点是正确的、值得采纳的？
-4. 你坚持认为对方哪些观点是错的或不足的？
+最后用一句话总结：**我认为对方最脆弱的一点是**：""",
 
-请给出你的最终立场，具体、坚定、有理由。"""
+    3: """【第3轮：攻防——拆框架】
 
-SYNTHESIS_SYSTEM = """You are the final synthesizer in a multi-AI debate.
-Given the full debate history, produce the single best answer.
-Be concrete, engineering-grade, and definitive."""
+对方（{other_name}）在质询中暴露的问题要点：
+{other_summary}
+
+本轮优先打"上层问题"（定义、标准、比较框架），不打细节例子：
+
+1. **回应**：对方质询中暴露了你方哪些问题？如何回应？
+2. **攻击对方框架**（最多2点）：
+   - 指出对方的定义或判断标准的问题
+   - 说明："如果按你方标准，会导致什么问题"
+3. **为什么我方框架更合理**：用具体理由说明""",
+
+    4: """【第4轮：攻防——打实质内容】
+
+对方（{other_name}）的核心论点要点：
+{other_summary}
+
+本轮进入核心结论本身：
+
+1. **攻击对方2个主论点的关键漏洞**：具体指出逻辑断裂或证据不足之处
+2. **防守本方主论点**：对方攻击了哪些？如何坚守？
+3. **压缩争点**：把当前辩论压缩成 1-2 个决定胜负的核心问题，明确说出来
+
+每次回应都要对应一个明确争点，不要无限扩展分支。""",
+
+    5: """【第5轮：焦点对辩】
+
+对方（{other_name}）的上一轮核心论点：
+{other_summary}
+
+本轮只围绕前面已形成的核心争点做正面交锋：
+
+- **只讨论已出现的1-2个核心焦点**，禁止引入新定义、新案例、新论点
+- 每次发言明确说：我在回答哪一个争点
+- 只允许：澄清、反驳、收束争点
+
+请正面回应对方在核心争点上的最强论点，说明为什么你方占优。""",
+
+    6: """【第6轮：总结陈词】
+
+请做最终总结（不引入新论点，只总结决定性部分）：
+
+结构：
+1. **这场辩论比什么**：重申本方的判断标准
+2. **双方争在哪**：回顾本场最终留下来的核心争点（1-2个）
+3. **为什么我方赢**：在这些核心争点上，本方为什么占优？具体说明
+4. **最终结论**（一句话）：这个知识库系统应该怎么做？
+
+这是判决书，不是重复，要有清晰的胜负逻辑。""",
+}
 
 
 # ── Data ──────────────────────────────────────────────────────────────────────
@@ -90,7 +136,8 @@ Be concrete, engineering-grade, and definitive."""
 @dataclass
 class RoundResult:
     round_num: int
-    answers: dict[str, str]   # name -> answer
+    round_name: str
+    answers: dict[str, str]
     user_guidance: str = ""
 
 @dataclass
@@ -103,22 +150,35 @@ class SymposiumResult:
 
 # ── Engine ─────────────────────────────────────────────────────────────────────
 
+ROUND_NAMES = {
+    1: "开场立论",
+    2: "聚焦质询",
+    3: "拆框架",
+    4: "打实质",
+    5: "焦点对辩",
+    6: "总结陈词",
+}
+
+POLL_INTERVAL = 15
+HARD_TIMEOUT = 900
+
+
 class SymposiumEngine:
     def __init__(
         self,
-        clients: list[AIClient],          # 3 browser clients, kept alive
-        api_key: str | None = None,       # Anthropic API key for analysis
-        debate_rounds: int = 3,
+        clients: list[AIClient],
+        api_key: str | None = None,
+        debate_rounds: int = 6,
         user_input_fn: Callable[[str], str] | None = None,
         log_fn: Callable[[str], None] | None = None,
     ):
         if len(clients) < 2:
             raise ValueError("Need at least 2 AI clients")
         self.clients = clients
-        self.api_key = api_key
         self.debate_rounds = debate_rounds
         self.user_input_fn = user_input_fn
         self.log_fn = log_fn
+
         oc_key, oc_model = _load_openclaw_anthropic()
         self._api_key = api_key or oc_key
         self._api_model = oc_model
@@ -130,34 +190,80 @@ class SymposiumEngine:
         else:
             print(msg, flush=True)
 
-    def _ask(self, client: AIClient, prompt: str, system: str | None = None) -> str:
+    def _api_call(self, prompt: str, max_tokens: int = 800) -> str:
+        if not self._anthropic:
+            return ""
         try:
-            return client.ask(prompt, system=system)
+            msg = self._anthropic.messages.create(
+                model=self._api_model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text.strip()
         except Exception as e:
-            return f"[Error from {client.name}: {e}]"
+            return f"[API error: {e}]"
 
-    def _ask_all_pipeline(self, clients: list[AIClient], prompt: str) -> dict[str, str]:
-        """
-        Pipeline: send sequentially (fast), then poll all pages until each is done.
-        While waiting for C1, C2 and C3 already have their messages sent.
-        """
-        POLL_INTERVAL = 15   # seconds between polls
-        HARD_TIMEOUT = 900   # 15 min
+    def _summarize_for_challenge(self, name: str, answer: str) -> str:
+        """Summarize one AI's answer to 3-5 key points for use in challenge prompt."""
+        if not self._anthropic or len(answer) < 600:
+            return answer
+        prompt = (
+            f"以下是 {name} 在辩论中的发言，请提炼出最核心的3-5个论点，"
+            f"每点1-2句话，保留关键概念和具体主张，去掉重复和铺垫：\n\n{answer}"
+        )
+        try:
+            msg = self._anthropic.messages.create(
+                model=self._api_model,
+                max_tokens=500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return msg.content[0].text.strip()
+        except Exception:
+            return answer[:1200]
 
-        full_prompt = REPLY_FORMAT_RULE + prompt
+    def _api_round_analysis(self, round_num: int, answers: dict[str, str]) -> str:
+        combined = "\n\n".join(f"=== {n} ===\n{a}" for n, a in answers.items())
+        prompt = (
+            f"第{round_num}轮辩论（{ROUND_NAMES.get(round_num, '')}）各方发言：\n\n{combined}\n\n"
+            "请简要分析：\n"
+            "1. 本轮双方的核心交锋点\n"
+            "2. 目前谁的论证更有力？为什么？\n"
+            "3. 还有哪些关键问题未解决？\n"
+            "保持简洁，每点不超过2句。"
+        )
+        return self._api_call(prompt, max_tokens=600)
 
-        # Step 1: send to all clients sequentially (fast)
-        for c in clients:
+    def _api_synthesis(self, question: str, all_rounds: list[RoundResult]) -> str:
+        history = "\n\n".join(
+            f"=== {r.round_name}（第{r.round_num}轮）===\n" +
+            "\n".join(f"-- {n} --\n{a}" for n, a in r.answers.items())
+            for r in all_rounds
+        )
+        prompt = (
+            f"辩题：{question}\n\n完整辩论记录：\n{history}\n\n"
+            "请给出最终综合答案：\n"
+            "1. 整合双方最佳观点\n"
+            "2. 解决核心分歧，给出明确立场\n"
+            "3. 具体、可操作的最终方案\n"
+            "4. 这个方案为什么比任何单方的方案更好"
+        )
+        return self._api_call(prompt, max_tokens=3000)
+
+    def _send_all(self, prompts: dict[str, str]):
+        """Pipeline: send to all clients sequentially (fast)."""
+        for c in self.clients:
+            full = REPLY_FORMAT_RULE + prompts.get(c.name, "")
             self._log(f"   ✉️  发送给 {c.name}...")
             try:
-                c._type_and_send(full_prompt)
+                c._type_and_send(full)
             except Exception as e:
                 self._log(f"   ⚠️  {c.name} 发送失败: {e}")
 
-        # Step 2: poll all pages until each reports done
+    def _wait_all(self, hint_prompt: str = "") -> dict[str, str]:
+        """Poll all pages until each is done."""
         self._log("   ⏳ 等待各方回复（轮询中）...")
         start = time.time()
-        pending = {c.name: c for c in clients}
+        pending = {c.name: c for c in self.clients}
         results: dict[str, str] = {}
 
         while pending and (time.time() - start) < HARD_TIMEOUT:
@@ -166,7 +272,7 @@ class SymposiumEngine:
                 try:
                     if check_done(c._page, c.name):
                         ans = extract_reply_after_anchor(c._page, c.name,
-                                                         getattr(c, '_last_prompt', prompt))
+                                                         getattr(c, '_last_prompt', hint_prompt))
                         if not ans:
                             ans = c._wait_for_response()
                         results[name] = ans
@@ -174,20 +280,17 @@ class SymposiumEngine:
                         del pending[name]
                 except Exception as e:
                     self._log(f"   ⚠️  {name} 轮询出错: {e}")
-
             if pending:
-                self._log(f"   ⏳ 还在等: {list(pending.keys())} "
-                          f"(已过 {int(time.time()-start)}s)")
+                elapsed = int(time.time() - start)
+                self._log(f"   ⏳ 还在等: {list(pending.keys())} ({elapsed}s)")
                 time.sleep(POLL_INTERVAL)
 
-        # timeout fallback
         for name, c in pending.items():
-            self._log(f"   ⏰ {name} 超时，尝试强制提取...")
+            self._log(f"   ⏰ {name} 超时，强制提取...")
             try:
                 results[name] = c._wait_for_response()
             except Exception as e:
                 results[name] = f"[{name} timeout: {e}]"
-
         return results
 
     def _ask_user(self, display: str) -> str:
@@ -195,215 +298,68 @@ class SymposiumEngine:
             return self.user_input_fn(display)
         return ""
 
-    def _summarize_for_challenge(self, name: str, answer: str) -> str:
-        """Summarize one AI's answer to key points for use in a challenge prompt."""
-        if not self._anthropic or len(answer) < 800:
-            return answer  # short enough, use as-is
-        prompt = (
-            f"以下是 {name} 对知识库问题的回答，请提炼出最核心的3-5个论点，"
-            f"每点1-2句话，保留具体数据结构或机制名称，去掉重复和废话：\n\n{answer}"
-        )
-        try:
-            msg = self._anthropic.messages.create(
-                model=self._api_model,
-                max_tokens=600,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text.strip()
-        except Exception:
-            return answer[:1500]  # fallback: truncate
-
-    def _api_summarize(self, question: str, answers: dict[str, str]) -> str:
-        """Use Claude API to summarize/compare answers. Fast, no browser."""
-        if not self._anthropic:
-            return ""
-        combined = "\n\n".join(f"=== {name} ===\n{ans}" for name, ans in answers.items())
-        prompt = (
-            f"原始问题: {question}\n\n"
-            f"各方回答:\n{combined}\n\n"
-            "请分析：\n"
-            "1. 各方的共识点\n"
-            "2. 各方的主要分歧\n"
-            "3. 各方都没有充分讨论但值得深挖的盲点\n\n"
-            "请保持简洁，每点不超过2-3句话。"
-        )
-        try:
-            msg = self._anthropic.messages.create(
-                model=self._api_model,
-                max_tokens=1500,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text.strip()
-        except Exception as e:
-            return f"[API分析失败: {e}]"
-
-    def _api_synthesis(self, question: str, all_rounds: list[RoundResult]) -> str:
-        """Final synthesis via API."""
-        if not self._anthropic:
-            return "[No API key for synthesis]"
-        history = "\n\n".join(
-            f"=== 第{r.round_num}轮 ===\n" +
-            "\n".join(f"-- {name} --\n{ans}" for name, ans in r.answers.items())
-            for r in all_rounds
-        )
-        prompt = (
-            f"原始问题: {question}\n\n"
-            f"完整辩论记录:\n{history}\n\n"
-            "请给出最终的、最具体的、工程化的综合答案。"
-            "整合各方最佳观点，解决分歧，给出可操作的方案。"
-        )
-        try:
-            msg = self._anthropic.messages.create(
-                model=self._api_model,
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text.strip()
-        except Exception as e:
-            return f"[API综合失败: {e}]"
-
-    def _format_round_summary(self, round_num: int, answers: dict[str, str], analysis: str) -> str:
+    def _format_round_display(self, rnd: int, name: str, answers: dict[str, str], analysis: str) -> str:
         sep = "=" * 60
-        lines = [sep, f"📋 第 {round_num} 轮结果", sep, ""]
-        for name, ans in answers.items():
-            preview = ans[:400] + ("..." if len(ans) > 400 else "")
-            lines += [f"── {name} ──", preview, ""]
-        lines += ["─" * 40, "🔍 API 分析：", analysis, sep]
+        lines = [sep, f"📋 第{rnd}轮：{name}", sep]
+        for ai, ans in answers.items():
+            preview = ans[:500] + ("..." if len(ans) > 500 else "")
+            lines += [f"\n── {ai} ──", preview]
+        lines += ["\n─── API 分析 ───", analysis, sep]
         return "\n".join(lines)
 
     def run(self, question: str) -> SymposiumResult:
         all_rounds: list[RoundResult] = []
         names = [c.name for c in self.clients]
+        prev_answers: dict[str, str] = {}
+        user_guidance = ""
 
-        # ── Round 0: pipeline send → parallel wait ─────────────────────────────
-        self._log("⚗️  Round 0: 三家 AI 流水线发送 + 并行等待...")
-        r0_answers = self._ask_all_pipeline(self.clients, question)
-
-        analysis0 = self._api_summarize(question, r0_answers)
-        r0 = RoundResult(round_num=0, answers=r0_answers)
-        all_rounds.append(r0)
-
-        summary0 = self._format_round_summary(0, r0_answers, analysis0)
-        self._log("\n" + summary0)
-
-        guidance = self._ask_user(
-            summary0 + "\n\n作为裁判，请输入你的引导（直接回车跳过）:\n> "
-        )
-        r0.user_guidance = guidance
-        if guidance:
-            self._log(f"👤 用户引导: {guidance}")
-
-        # ── Debate rounds ─────────────────────────────────────────────────────
         for rnd in range(1, self.debate_rounds + 1):
-            self._log(f"\n⚔️  第 {rnd} 轮辩论...")
-            prev_answers = all_rounds[-1].answers
-            rnd_answers: dict[str, str] = {}
+            rname = ROUND_NAMES.get(rnd, f"第{rnd}轮")
+            self._log(f"\n{'='*60}")
+            self._log(f"⚔️  第{rnd}轮：{rname}")
+            self._log("="*60)
 
-            # Build per-client challenge prompts (format rule prepended)
-            challenge_prompts: dict[str, str] = {}
+            # Build prompts for each client
+            prompts: dict[str, str] = {}
             for i, client in enumerate(self.clients):
                 other = self.clients[(i + 1) % len(self.clients)]
                 other_ans = prev_answers.get(other.name, "")
-                # Summarize opponent's answer to key points before sending
-                other_summary = self._summarize_for_challenge(other.name, other_ans)
-                challenge = CHALLENGE_TMPL.format(
+                other_summary = self._summarize_for_challenge(other.name, other_ans) if other_ans else ""
+
+                template = ROUND_PROMPTS.get(rnd, ROUND_PROMPTS[5])
+                p = template.format(
+                    question=question,
                     other_name=other.name,
-                    other_answer=other_summary,
+                    other_summary=other_summary,
                 )
-                if guidance:
-                    challenge = USER_GUIDANCE_TMPL.format(guidance=guidance) + "\n\n" + challenge
-                challenge_prompts[client.name] = REPLY_FORMAT_RULE + challenge
+                if user_guidance:
+                    p = f"【裁判引导】{user_guidance}\n\n" + p
+                prompts[client.name] = p
 
-            # Pipeline: send sequentially then poll all
-            self._log(f"   流水线发送挑战...")
-            for c in self.clients:
-                self._log(f"   ✉️  发送给 {c.name}...")
-                try:
-                    c._type_and_send(challenge_prompts[c.name])
-                except Exception as e:
-                    self._log(f"   ⚠️  {c.name} 发送失败: {e}")
+            # Send all + wait all
+            self._send_all(prompts)
+            answers = self._wait_all()
 
-            self._log("   ⏳ 等待各方回复（轮询中）...")
-            start_t = time.time()
-            pending2 = {c.name: c for c in self.clients}
-            while pending2 and (time.time() - start_t) < 900:
-                for name in list(pending2.keys()):
-                    c = pending2[name]
-                    try:
-                        if check_done(c._page, c.name):
-                            ans = extract_reply_after_anchor(
-                                c._page, c.name,
-                                getattr(c, '_last_prompt', challenge_prompts[name]))
-                            if not ans:
-                                ans = c._wait_for_response()
-                            rnd_answers[name] = ans
-                            self._log(f"   ✓ {name} 完成 ({len(ans)} chars)")
-                            del pending2[name]
-                    except Exception as e:
-                        self._log(f"   ⚠️  {name} 出错: {e}")
-                if pending2:
-                    self._log(f"   ⏳ 还在等: {list(pending2.keys())} ({int(time.time()-start_t)}s)")
-                    time.sleep(15)
-
-            analysis = self._api_summarize(question, rnd_answers)
-            rr = RoundResult(round_num=rnd, answers=rnd_answers)
+            # API round analysis
+            analysis = self._api_round_analysis(rnd, answers)
+            rr = RoundResult(round_num=rnd, round_name=rname, answers=answers)
             all_rounds.append(rr)
+            prev_answers = answers
 
-            summary = self._format_round_summary(rnd, rnd_answers, analysis)
-            self._log("\n" + summary)
+            # Display + user input
+            display = self._format_round_display(rnd, rname, answers, analysis)
+            self._log("\n" + display)
 
-            guidance = self._ask_user(
-                summary + f"\n\n第{rnd}轮结束。请输入下一轮引导（直接回车继续）:\n> "
-            )
-            rr.user_guidance = guidance
-            if guidance:
-                self._log(f"👤 用户引导: {guidance}")
+            if rnd < self.debate_rounds:
+                guidance = self._ask_user(
+                    display + f"\n\n第{rnd}轮结束。请输入裁判引导（直接回车继续）:\n> "
+                )
+                rr.user_guidance = guidance
+                if guidance:
+                    user_guidance = guidance
+                    self._log(f"👤 裁判引导: {guidance}")
 
-        # ── Final conclusions: each AI states their own position ──────────────
-        self._log("\n🎯 最终结论轮：各方陈述最终立场...")
-        conclusion_answers: dict[str, str] = {}
-        for i, client in enumerate(self.clients):
-            other = self.clients[(i + 1) % len(self.clients)]
-            conclusion_prompt = CONCLUSION_TMPL.format(other_name=other.name)
-            self._log(f"   ✉️  {client.name} 陈述最终结论...")
-            try:
-                client._type_and_send(conclusion_prompt)
-            except Exception as e:
-                self._log(f"   ⚠️  {client.name} 发送失败: {e}")
-
-        self._log("   ⏳ 等待各方最终结论...")
-        start_c = time.time()
-        pending_c = {c.name: c for c in self.clients}
-        while pending_c and (time.time() - start_c) < 900:
-            from .clients.playwright.response_waiter import check_done, extract_reply_after_anchor
-            for name in list(pending_c.keys()):
-                c = pending_c[name]
-                try:
-                    if check_done(c._page, c.name):
-                        ans = extract_reply_after_anchor(c._page, c.name, CONCLUSION_TMPL[:100])
-                        if not ans:
-                            ans = c._wait_for_response()
-                        conclusion_answers[name] = ans
-                        self._log(f"   ✓ {name} 结论完成 ({len(ans)} chars)")
-                        del pending_c[name]
-                except Exception as e:
-                    self._log(f"   ⚠️  {name} 出错: {e}")
-            if pending_c:
-                time.sleep(15)
-
-        conclusion_round = RoundResult(round_num=999, answers=conclusion_answers)
-        all_rounds.append(conclusion_round)
-
-        # Print conclusions
-        sep = "=" * 60
-        self._log(f"\n{sep}")
-        self._log("🎯 各方最终结论")
-        self._log(sep)
-        for name, ans in conclusion_answers.items():
-            self._log(f"\n── {name} 的最终结论 ──")
-            self._log(ans)
-
-        # ── Synthesis ─────────────────────────────────────────────────────────
+        # Final synthesis
         self._log("\n✨ 最终综合（API）...")
         synthesis = self._api_synthesis(question, all_rounds)
 
