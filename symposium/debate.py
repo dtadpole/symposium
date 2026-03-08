@@ -394,12 +394,16 @@ class SymposiumEngine:
             for name in list(pending.keys()):
                 c = pending[name]
                 try:
-                    stop_sels = _PH.get(c.name, {}).get("stop_sels", [])
+                    hints = _PH.get(c.name, {})
+                    stop_sels = hints.get("stop_sels", [])
+                    thinking_sels = hints.get("thinking_sels", [])
+                    # combine: any "actively generating" indicator counts for Phase 1
+                    generating_sels = stop_sels + thinking_sels
 
                     # Phase 1: confirm client started generating
                     if name not in _seen_generating:
-                        if _el_exists(c._page, stop_sels):
-                            # stop button is visible → currently generating
+                        if _el_exists(c._page, generating_sels):
+                            # stop/thinking button visible → currently generating
                             _seen_generating.add(name)
                             self._log(f"   🟡 {name} 已开始生成...")
                             continue
