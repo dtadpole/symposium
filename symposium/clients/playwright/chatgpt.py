@@ -136,7 +136,10 @@ class ChatGPTClient(PlaywrightChatClient):
             return False
 
     def _type_and_send(self, text: str):
-        """Send message. If text contains attachment marker, upload that part as file."""
+        """Send message. If text contains attachment marker, upload that part as file.
+
+        If upload fails, the full opponent text is appended inline (no data loss).
+        """
         self._reply_before = scan_reply_candidates(self._page)
         self._baseline_snap = _page_state_snapshot(self._page, self.name)
         self._last_prompt = text
@@ -148,7 +151,16 @@ class ChatGPTClient(PlaywrightChatClient):
             parts = text.split(ATTACHMENT_MARKER, 1)
             main_text = parts[0].strip()
             attachment_content = parts[1].strip()
-            self._upload_file(attachment_content)
+            uploaded = self._upload_file(attachment_content)
+            if uploaded:
+                print(f"   ✅ [ChatGPT] 附件上传成功（{len(attachment_content)} 字符）", flush=True)
+            else:
+                # Fallback: include full content inline so nothing is lost
+                print(f"   ⚠️  [ChatGPT] 附件上传失败，改为 inline 全文", flush=True)
+                main_text = main_text.replace(
+                    '（对方完整发言见附件 opponent_argument.txt）',
+                    f'【对方完整发言】\n────────────────────────────────────────\n{attachment_content}\n────────────────────────────────────────'
+                )
             page.wait_for_timeout(500)
 
         # Paste main text via ClipboardEvent

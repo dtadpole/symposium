@@ -259,11 +259,24 @@ class SymposiumEngine:
             self._log(f"⚠️  Parent agent 回传异常: {e}")
             return False
 
-    def _send_all(self, prompts: dict[str, str]):
+    def _save_round_content(self, round_num: int, client_name: str, content: str) -> str:
+        """Persist a debater's full response to a file. Returns the file path."""
+        output_dir = Path(_CALLBACK_CFG.get("output_dir", "~/Symposium/output")).expanduser()
+        round_dir = output_dir / "rounds"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        fname = round_dir / f"R{round_num}_{client_name.replace(' ', '_')}.txt"
+        with open(fname, "w", encoding="utf-8") as f:
+            f.write(content)
+        return str(fname)
+
+    def _send_all(self, prompts: dict[str, str], prev_answers: dict[str, str] = None,
+                  round_num: int = 0):
         """Pipeline: send to all clients sequentially (fast).
 
-        For ChatGPT: if prompt contains {other_full} block, extract it and
-        send as file attachment (using ATTACHMENT_MARKER split).
+        For ChatGPT: opponent's full text (Claude's response) is:
+          1. Saved to a persistent file (~/Symposium/output/rounds/R{n}_Claude.txt)
+          2. Uploaded as .txt file attachment to ChatGPT
+          3. If upload fails → include full text inline (no data loss)
         For Claude: ClipboardEvent paste already displays long text as a block.
         """
         for c in self.clients:
@@ -271,23 +284,27 @@ class SymposiumEngine:
             full = REPLY_FORMAT_RULE + prompt
             self._log(f"   ✉️  发送给 {c.name}...")
             try:
-                # For ChatGPT: split out the attachment section (between ──── delimiters)
+                # For ChatGPT: upload opponent content as file attachment
                 if c.name == "ChatGPT" and "────────────────────────────────────────" in full:
-                    import re
-                    # Extract content between the delimiter lines as attachment
                     m = re.search(
                         r'────────────────────────────────────────\n(.*?)\n────────────────────────────────────────',
                         full, re.DOTALL
                     )
                     if m:
                         attachment_content = m.group(1).strip()
-                        # Replace the block with a reference line
+                        char_count = len(attachment_content)
+                        self._log(f"   📎 对方原文 {char_count} 字符，准备上传附件...")
+
+                        # Save to persistent file first (guarantee no data loss)
+                        saved_path = self._save_round_content(round_num, "Claude", attachment_content)
+                        self._log(f"   💾 已持久化: {saved_path}")
+
+                        # Replace block with reference + ATTACHMENT_MARKER for upload
                         main_text = re.sub(
                             r'────────────────────────────────────────\n.*?\n────────────────────────────────────────',
-                            '（对方完整发言见附件）',
+                            '（对方完整发言见附件 opponent_argument.txt）',
                             full, flags=re.DOTALL
                         )
-                        # Inject attachment marker for chatgpt client
                         full = main_text + f"\n\n{ATTACHMENT_MARKER}\n" + attachment_content
                 c._type_and_send(full)
             except Exception as e:
@@ -379,7 +396,7 @@ class SymposiumEngine:
                 prompts[client.name] = p
 
             # Send all + wait all
-            self._send_all(prompts)
+            self._send_all(prompts, round_num=rnd)
             answers = self._wait_all()
 
             # API round analysis
