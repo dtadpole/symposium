@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Symposium CLI — ask once, let the AIs debate via browser.
+Symposium CLI — ask once, let the AIs debate.
 
-Usage:
-  python -m symposium.main "your question"
-  python -m symposium.main          # interactive mode
-  python -m symposium.main --rounds 2 "..."
+Backend strategy (most reliable first):
+  - Claude  → Anthropic API  (always stable, no browser needed)
+  - ChatGPT → Playwright web (reuses existing browser session)
+  - Gemini  → Playwright web (reuses existing browser session)
 """
 
 import argparse
@@ -15,7 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path.home() / "skill-foundry"))
 
 from tools.stealth_browser.browser import StealthBrowser
-from .clients.playwright import ChatGPTClient, ClaudeWebClient, GeminiWebClient
+from .clients.claude import ClaudeClient
+from .clients.playwright import ChatGPTClient, GeminiWebClient
 from .debate import SymposiumEngine
 from .output import print_result, save_markdown
 
@@ -25,32 +26,34 @@ DEFAULT_OUTPUT = Path.home() / "Documents/Synced Vault #1/AI Chats/Symposium"
 
 def run(question: str, save: bool = True, debate_rounds: int = 1):
     print("\n🏛  Symposium is convening...\n")
-    print("Opening browser (headless=False, stealth mode)...")
 
-    with StealthBrowser(session_path=STORAGE_FILE) as sb:
-        # Each AI gets its own page (tab) — conversations stay independent
-        print("  📄 Opening page for Claude...")
-        page_claude = sb.new_page()
+    # Claude via API
+    print("  ✓ Claude  (API)")
+    claude = ClaudeClient()
 
-        print("  📄 Opening page for ChatGPT...")
-        page_gpt = sb.new_page()
+    # ChatGPT + Gemini via browser
+    print("  ↗ Opening browser for ChatGPT & Gemini...")
+    sb = StealthBrowser(session_path=STORAGE_FILE)
+    sb.start()
 
-        print("  📄 Opening page for Gemini...")
-        page_gemini = sb.new_page()
+    page_gpt    = sb.new_page()
+    page_gemini = sb.new_page()
 
-        clients = [
-            ClaudeWebClient(page_claude),
-            ChatGPTClient(page_gpt),
-            GeminiWebClient(page_gemini),
-        ]
+    clients = [
+        claude,
+        ChatGPTClient(page_gpt),
+        GeminiWebClient(page_gemini),
+    ]
 
-        print(f"\n✓ 3 AI participants ready: {', '.join(c.name for c in clients)}\n")
+    print(f"  ✓ ChatGPT (browser)")
+    print(f"  ✓ Gemini  (browser)")
+    print(f"\n3 participants ready. Starting debate...\n")
 
+    try:
         engine = SymposiumEngine(clients, debate_rounds=debate_rounds)
-        result = engine.run(
-            question,
-            verbose_callback=lambda m: print(f"\n{m}")
-        )
+        result = engine.run(question, verbose_callback=lambda m: print(f"\n{m}"))
+    finally:
+        sb.stop()
 
     print_result(result)
 
@@ -63,7 +66,7 @@ def run(question: str, save: bool = True, debate_rounds: int = 1):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="🏛 Symposium — Multi-AI debate engine (browser-based)"
+        description="🏛 Symposium — Multi-AI debate engine"
     )
     parser.add_argument("question", nargs="?", help="Question to debate")
     parser.add_argument("--no-save", action="store_true", help="Don't save to Obsidian")
@@ -72,7 +75,7 @@ def main():
 
     question = args.question
     if not question:
-        print("🏛  Symposium — Multi-AI Debate Engine (browser mode)")
+        print("🏛  Symposium — Multi-AI Debate Engine")
         print("Enter your question (or Ctrl+C to exit):\n")
         try:
             question = input("> ").strip()

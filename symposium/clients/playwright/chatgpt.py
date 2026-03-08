@@ -9,8 +9,17 @@ class ChatGPTClient(PlaywrightChatClient):
     start_url = "https://chatgpt.com/"
 
     def _init_conversation(self):
-        self._page.goto(self.start_url, wait_until="domcontentloaded")
-        self._page.wait_for_timeout(3000)
+        # Retry up to 3 times in case of navigation abort
+        for attempt in range(3):
+            try:
+                self._page.goto(self.start_url, wait_until="domcontentloaded", timeout=20000)
+                self._page.wait_for_timeout(3000)
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                self._page.wait_for_timeout(2000)
+
         # Click "New Chat" if present
         try:
             new_chat = self._page.locator('[data-testid="create-new-chat-button"], a[href="/"]').first
@@ -20,7 +29,7 @@ class ChatGPTClient(PlaywrightChatClient):
         except Exception:
             pass
         # Wait for input to appear
-        self._page.wait_for_selector("#prompt-textarea", timeout=15000)
+        self._page.wait_for_selector("#prompt-textarea", timeout=20000)
 
     def _type_and_send(self, text: str):
         box = self._page.locator("#prompt-textarea").first
