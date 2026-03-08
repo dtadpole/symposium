@@ -2,15 +2,14 @@
 """
 Symposium CLI — ask once, let the AIs debate.
 
-Participants (default):
+Participants:
   - Claude  → Playwright web (preserves conversation context)
   - ChatGPT → Playwright web (preserves conversation context)
 
-Gemini removed: quota too low, reasoning depth insufficient.
-Analysis and synthesis use Anthropic API (fast, no browser needed).
+Analysis, synthesis, and judge evaluation use Anthropic API.
+Browser windows stay open after debate for review.
 """
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -19,18 +18,35 @@ sys.path.insert(0, str(Path.home() / "skill-foundry"))
 from tools.stealth_browser.browser import StealthBrowser
 from .clients.playwright.claude import ClaudeWebClient
 from .clients.playwright.chatgpt import ChatGPTClient
-from .debate import SymposiumEngine
+from .debate import (
+    SymposiumEngine,
+    DEFAULT_QUESTION,
+    DEFAULT_ROUNDS,
+    OPENING_CONTEXT,
+)
 from .output import print_result, save_markdown
 
 STORAGE_FILE = str(Path.home() / ".playwright-stealth/storage/session.json")
 DEFAULT_OUTPUT = Path.home() / "Documents/Synced Vault #1/AI Chats/Symposium"
 
 
-def run(question: str, save: bool = True, debate_rounds: int = 3,
+def run(question: str = "", opening_context: str = "",
+        save: bool = True, debate_rounds: int = 0,
         user_input_fn=None):
-    print("\n🏛  Symposium is convening...\n")
 
-    with StealthBrowser(session_path=STORAGE_FILE) as sb:
+    question = question or DEFAULT_QUESTION
+    opening_context = opening_context or OPENING_CONTEXT
+    debate_rounds = debate_rounds or DEFAULT_ROUNDS
+
+    print("\n🏛  Symposium is convening...\n")
+    print(f"议题: {question[:80]}...")
+    print(f"轮次: {debate_rounds}\n")
+
+    # Start browser — do NOT use context manager (browser stays open after debate)
+    sb = StealthBrowser(session_path=STORAGE_FILE, headless=False)
+    sb.start()
+
+    try:
         clients = [
             ClaudeWebClient(sb.new_page()),
             ChatGPTClient(sb.new_page()),
@@ -43,14 +59,19 @@ def run(question: str, save: bool = True, debate_rounds: int = 3,
             c.ensure_best_config()
             print(f"  ✓ {c.name} ready")
 
-        print(f"\n{len(clients)} participants ready. Starting debate ({debate_rounds} rounds)...\n")
+        print(f"\n{len(clients)} 位辩手就绪，开始 {debate_rounds} 轮辩论...\n")
 
         engine = SymposiumEngine(
             clients=clients,
             debate_rounds=debate_rounds,
             user_input_fn=user_input_fn,
         )
-        result = engine.run(question)
+        result = engine.run(question, opening_context=opening_context)
+
+    except Exception as e:
+        print(f"\n❌ 辩论异常终止: {e}")
+        raise
+    # NOTE: sb.stop() deliberately NOT called — browser stays open for review
 
     print_result(result)
 
@@ -62,28 +83,6 @@ def run(question: str, save: bool = True, debate_rounds: int = 3,
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="🏛 Symposium — Multi-AI debate engine (Claude + ChatGPT)"
-    )
-    parser.add_argument("question", nargs="?", help="Question to debate")
-    parser.add_argument("--no-save", action="store_true", help="Don't save to Obsidian")
-    parser.add_argument("--rounds", type=int, default=3, help="Debate rounds (default: 3)")
-    args = parser.parse_args()
-
-    question = args.question
-    if not question:
-        print("🏛  Symposium — Multi-AI Debate Engine (Claude + ChatGPT)")
-        print("Enter your question (or Ctrl+C to exit):\n")
-        try:
-            question = input("> ").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\nBye.")
-            sys.exit(0)
-
-    if not question:
-        print("No question provided.")
-        sys.exit(1)
-
     def user_input_fn(prompt):
         print(prompt[-800:])
         try:
@@ -91,8 +90,7 @@ def main():
         except EOFError:
             return ""
 
-    run(question, save=not args.no_save, debate_rounds=args.rounds,
-        user_input_fn=user_input_fn)
+    run(user_input_fn=user_input_fn)
 
 
 if __name__ == "__main__":
