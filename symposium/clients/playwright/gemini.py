@@ -3,6 +3,8 @@
 import time
 from .base import PlaywrightChatClient
 from .chooser import choose_best
+from .reply_extractor import scan_reply_candidates, extract_reply
+from .response_waiter import _page_state_snapshot, wait_for_completion, extract_reply_after_anchor
 
 
 class GeminiWebClient(PlaywrightChatClient):
@@ -59,6 +61,9 @@ class GeminiWebClient(PlaywrightChatClient):
 
     def _type_and_send(self, text: str):
         page = self._page
+        self._reply_before = scan_reply_candidates(page)
+        self._baseline_snap = _page_state_snapshot(page, self.name)
+        self._last_prompt = text
         try:
             box = page.locator('.ql-editor').first
             box.click()
@@ -81,24 +86,14 @@ class GeminiWebClient(PlaywrightChatClient):
 
     def _wait_for_response(self) -> str:
         page = self._page
-        try:
-            page.wait_for_selector(
-                '.loading-indicator, [aria-label="Gemini is thinking"], '
-                'model-response [class*="loading"], .response-loading',
-                timeout=15000
-            )
-        except Exception:
-            pass
-        try:
-            page.wait_for_selector(
-                '.loading-indicator, [aria-label="Gemini is thinking"], .response-loading',
-                state="hidden",
-                timeout=120000
-            )
-        except Exception:
-            page.wait_for_timeout(5000)
-
+        baseline = getattr(self, '_baseline_snap', _page_state_snapshot(page, self.name))
+        wait_for_completion(page, self.name, baseline)
         page.wait_for_timeout(1000)
+
+        prompt = getattr(self, '_last_prompt', '')
+        text = extract_reply_after_anchor(page, self.name, prompt)
+        if text:
+            return text
 
         for sel in [
             'model-response .response-container-content',

@@ -4,6 +4,8 @@ import time
 import random
 from .base import PlaywrightChatClient
 from .chooser import choose_best
+from .reply_extractor import scan_reply_candidates, extract_reply
+from .response_waiter import _page_state_snapshot, wait_for_completion, extract_reply_after_anchor
 
 
 class ClaudeWebClient(PlaywrightChatClient):
@@ -95,14 +97,27 @@ class ClaudeWebClient(PlaywrightChatClient):
 
     def _type_and_send(self, text: str):
         page = self._page
-        for sel in ['div[contenteditable="true"]', '.ProseMirror', '[data-testid="chat-input"]']:
+        self._reply_before = scan_reply_candidates(page)
+        self._baseline_snap = _page_state_snapshot(page, self.name)
+        self._last_prompt = text
+        for sel in ['.ProseMirror', 'div[contenteditable="true"]', '[data-testid="chat-input"]']:
             try:
                 box = page.locator(sel).first
                 if box.is_visible(timeout=2000):
                     box.click()
-                    page.wait_for_timeout(random.randint(200, 500))
-                    page.keyboard.type(text, delay=random.randint(15, 40))
-                    page.wait_for_timeout(random.randint(300, 600))
+                    page.wait_for_timeout(random.randint(200, 400))
+                    # Use clipboard paste to avoid keyboard.type garbling long text
+                    page.evaluate(
+                        '''(t) => {
+                            const dt = new DataTransfer();
+                            dt.setData("text/plain", t);
+                            document.activeElement.dispatchEvent(
+                                new ClipboardEvent("paste", {bubbles:true, cancelable:true, clipboardData:dt})
+                            );
+                        }''',
+                        text
+                    )
+                    page.wait_for_timeout(random.randint(300, 500))
                     break
             except Exception:
                 continue
@@ -117,17 +132,16 @@ class ClaudeWebClient(PlaywrightChatClient):
 
     def _wait_for_response(self) -> str:
         page = self._page
-        try:
-            page.wait_for_selector('[data-is-streaming="true"]', timeout=15000)
-        except Exception:
-            pass
-        try:
-            page.wait_for_selector('[data-is-streaming="true"]', state='hidden', timeout=120000)
-        except Exception:
-            pass
-        page.wait_for_timeout(1500)
+        baseline = getattr(self, '_baseline_snap', _page_state_snapshot(page, self.name))
+        status = wait_for_completion(page, self.name, baseline)
+        page.wait_for_timeout(800)
 
-        # Most robust extraction on current Claude UI: parse page text and remove UI boilerplate.
+        prompt = getattr(self, '_last_prompt', '')
+        text = extract_reply_after_anchor(page, self.name, prompt)
+        if text:
+            return text
+
+        # Fallback: parse body text and strip UI boilerplate.
         try:
             body = page.evaluate('() => document.body.innerText') or ''
             lines = [x.strip() for x in body.splitlines() if x.strip()]
@@ -149,7 +163,6 @@ class ClaudeWebClient(PlaywrightChatClient):
                 if is_model_line(ln):
                     continue
                 cleaned.append(ln)
-            # Walk backwards and return the last non-UI line that isn't obviously user/account text.
             for ln in reversed(cleaned):
                 if ln in {'Z', 'Zhen', 'Max plan'}:
                     continue

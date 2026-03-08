@@ -12,6 +12,8 @@ Before every message, the client must try to enforce:
 from playwright.sync_api import Page
 from ..base import AIClient
 from .ui_agent import scan_ui, choose_action, recover_page, focus_best_input
+from .input_probe import find_working_input
+from .reply_extractor import scan_reply_candidates
 
 
 class PlaywrightChatClient(AIClient):
@@ -56,6 +58,15 @@ class PlaywrightChatClient(AIClient):
             recover_page(self._page, ui)
         else:
             focus_best_input(self._page, ui)
+
+        # Robust input stabilization: probe multiple candidates and keep the first working one.
+        working_input = find_working_input(self._page)
+        if working_input is None:
+            # one recovery retry
+            recover_page(self._page, scan_ui(self._page))
+            working_input = find_working_input(self._page)
+        if working_input is None:
+            raise RuntimeError(f"{self.name}: no working input candidate found")
 
         full_prompt = f"{system}\n\n{prompt}" if system else prompt
         self._type_and_send(full_prompt)

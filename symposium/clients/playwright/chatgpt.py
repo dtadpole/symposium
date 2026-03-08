@@ -3,6 +3,8 @@
 import time
 from .base import PlaywrightChatClient
 from .chooser import choose_best
+from .reply_extractor import scan_reply_candidates, extract_reply
+from .response_waiter import _page_state_snapshot, wait_for_completion, extract_reply_after_anchor
 
 
 class ChatGPTClient(PlaywrightChatClient):
@@ -72,12 +74,14 @@ class ChatGPTClient(PlaywrightChatClient):
         self._page.wait_for_selector("#prompt-textarea", timeout=20000)
 
     def _type_and_send(self, text: str):
+        self._reply_before = scan_reply_candidates(self._page)
+        self._baseline_snap = _page_state_snapshot(self._page, self.name)
+        self._last_prompt = text
         box = self._page.locator("#prompt-textarea").first
         box.click()
         box.fill("")
         box.type(text, delay=10)
         self._page.wait_for_timeout(300)
-        # Press Enter or click send button
         try:
             send = self._page.locator('[data-testid="send-button"]').first
             send.click(timeout=3000)
@@ -86,22 +90,19 @@ class ChatGPTClient(PlaywrightChatClient):
 
     def _wait_for_response(self) -> str:
         page = self._page
-        try:
-            page.wait_for_selector('[data-testid="stop-button"]', timeout=15000)
-        except Exception:
-            pass
-        try:
-            page.wait_for_selector('[data-testid="stop-button"]', state="hidden", timeout=120000)
-        except Exception:
-            pass
+        baseline = getattr(self, '_baseline_snap', _page_state_snapshot(page, self.name))
+        wait_for_completion(page, self.name, baseline)
         page.wait_for_timeout(800)
+
+        prompt = getattr(self, '_last_prompt', '')
+        text = extract_reply_after_anchor(page, self.name, prompt)
+        if text:
+            return text
 
         msgs = page.locator('[data-message-author-role="assistant"]').all()
         if msgs:
             return msgs[-1].inner_text().strip()
-
         blocks = page.locator('.markdown').all()
         if blocks:
             return blocks[-1].inner_text().strip()
-
         return "[ChatGPT: could not extract response]"
