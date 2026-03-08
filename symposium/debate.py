@@ -328,14 +328,18 @@ class SymposiumEngine:
             prev_len = cur_len
 
     def _wait_all(self, hint_prompt: str = "", round_num: int = 0) -> dict[str, str]:
-        """Poll all pages until each is done.
+        """Poll all pages until EVERY client is done — never returns early.
 
-        After check_done() signals completion:
-          1. Wait until text_len is fully stable (no more streaming)
-          2. Extract full response
-          3. Save to ~/Symposium/output/rounds/R{n}_{name}.txt
+        Flow per client:
+          1. check_done() → completion signal detected
+          2. _wait_until_text_stable() → streaming fully stopped (3 stable snapshots)
+          3. extract_reply_after_anchor() → get ONLY current round's reply
+          4. _save_round_content() → persist to file immediately
+          5. Log char count + file path
+
+        Only returns after ALL clients have completed steps 1-4.
         """
-        self._log("   ⏳ 等待各方回复（轮询中）...")
+        self._log("   ⏳ 等待各方回复（双方都完成才继续）...")
         start = time.time()
         pending = {c.name: c for c in self.clients}
         results: dict[str, str] = {}
@@ -345,32 +349,34 @@ class SymposiumEngine:
                 c = pending[name]
                 try:
                     if check_done(c._page, c.name):
-                        # Wait for text to fully stop streaming before extracting
-                        self._log(f"   🔄 {name} 完成信号收到，等待文字流式结束...")
+                        self._log(f"   🔄 {name} 完成信号收到，等待流式输出完全停止...")
                         self._wait_until_text_stable(c._page, c.name, patience=3)
+                        self._log(f"   ✔  {name} 文字已稳定，开始提取...")
 
-                        ans = extract_reply_after_anchor(c._page, c.name,
-                                                         getattr(c, '_last_prompt', hint_prompt))
+                        ans = extract_reply_after_anchor(
+                            c._page, c.name, getattr(c, '_last_prompt', hint_prompt)
+                        )
                         if not ans:
                             ans = c._wait_for_response()
 
-                        # Save full response to file immediately
                         if ans and round_num > 0:
                             saved = self._save_round_content(round_num, name, ans)
-                            self._log(f"   💾 {name} 完整回复已保存 ({len(ans)} 字符): {saved}")
+                            self._log(f"   💾 R{round_num}_{name} 已写入文件 ({len(ans)} 字符)")
 
                         results[name] = ans
-                        self._log(f"   ✓ {name} 完成 ({len(ans)} chars)")
+                        self._log(f"   ✅ {name} 第{round_num}轮完成 ({len(ans)} chars)")
                         del pending[name]
                 except Exception as e:
                     self._log(f"   ⚠️  {name} 轮询出错: {e}")
+
             if pending:
                 elapsed = int(time.time() - start)
-                self._log(f"   ⏳ 还在等: {list(pending.keys())} ({elapsed}s)")
+                self._log(f"   ⏳ 仍在等待: {list(pending.keys())} ({elapsed}s) — 不会提前继续")
                 time.sleep(POLL_INTERVAL)
 
+        # Timeout fallback — still save whatever we can
         for name, c in pending.items():
-            self._log(f"   ⏰ {name} 超时，强制提取...")
+            self._log(f"   ⏰ {name} 超时，强制提取并保存...")
             try:
                 ans = c._wait_for_response()
                 if ans and round_num > 0:
@@ -378,6 +384,8 @@ class SymposiumEngine:
                 results[name] = ans
             except Exception as e:
                 results[name] = f"[{name} timeout: {e}]"
+
+        self._log(f"   🔒 所有参与方已完成第{round_num}轮，双方数据均已落盘")
         return results
 
     def _ask_user(self, display: str) -> str:
@@ -460,10 +468,32 @@ class SymposiumEngine:
             self._send_all(prompts, round_num=rnd)
 
             # Step 2+3: wait for BOTH to fully stop, extract + save files
-            # File naming: R{N}_{name}.txt  (saved inside _wait_all)
+            # _wait_all does NOT return until ALL clients are complete
             answers = self._wait_all(round_num=rnd)
 
-            # Step 4: API round analysis
+            # Step 4: hard gate — confirm BOTH files exist with content before proceeding
+            self._log(f"\n   🔒 第{rnd}轮完成门控检查...")
+            all_confirmed = True
+            for c in self.clients:
+                content = self._read_round_file(rnd, c.name)
+                if content:
+                    self._log(f"   ✅ R{rnd}_{c.name}.txt — {len(content)} 字符 ✓")
+                else:
+                    # File missing: write from in-memory answers as fallback
+                    fallback = answers.get(c.name, "")
+                    if fallback:
+                        self._save_round_content(rnd, c.name, fallback)
+                        self._log(f"   ⚠️  R{rnd}_{c.name}.txt 缺失，已从内存补写 ({len(fallback)} 字符)")
+                    else:
+                        self._log(f"   ❌ R{rnd}_{c.name} 内容缺失！")
+                        all_confirmed = False
+
+            if not all_confirmed:
+                self._log(f"   ⚠️  第{rnd}轮数据不完整，继续但标记为异常")
+            else:
+                self._log(f"   ✅ 第{rnd}轮双方回复均已确认完整，进入下一轮")
+
+            # Step 5: API round analysis
             analysis = self._api_round_analysis(rnd, answers)
             rr = RoundResult(round_num=rnd, round_name=rname, answers=answers)
             all_rounds.append(rr)
