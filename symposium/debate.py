@@ -394,9 +394,25 @@ class SymposiumEngine:
         lines += ["\n─── API 分析 ───", analysis, sep]
         return "\n".join(lines)
 
+    def _read_round_file(self, round_num: int, client_name: str) -> str:
+        """Read a previously saved round response file. Returns empty string if not found."""
+        output_dir = Path(_CALLBACK_CFG.get("output_dir", "~/Symposium/output")).expanduser()
+        fname = output_dir / "rounds" / f"R{round_num}_{client_name.replace(' ', '_')}.txt"
+        try:
+            return fname.read_text(encoding="utf-8").strip()
+        except Exception:
+            return ""
+
     def run(self, question: str, opening_context: str = "") -> SymposiumResult:
+        """
+        Round flow (strict synchronous):
+          For each round N (1..5):
+            1. Both AIs send simultaneously (each gets opponent's R(N-1) file as attachment)
+            2. Wait until BOTH fully stop streaming (text-stable check)
+            3. Extract ONLY latest response from each, save to R{N}_{name}.txt
+            4. (Next round reads from those files — never from live page)
+        """
         all_rounds: list[RoundResult] = []
-        prev_answers: dict[str, str] = {}
         user_guidance = ""
 
         # ── Send opening context to both AIs before Round 1 ──────────────────
@@ -404,10 +420,8 @@ class SymposiumEngine:
             self._log("\n📋 发送开场设定给所有参与方...")
             setup_prompts = {c.name: opening_context for c in self.clients}
             self._send_all(setup_prompts)
-            setup_answers = self._wait_all(hint_prompt=opening_context)
+            self._wait_all(hint_prompt=opening_context)
             self._log("   ✓ 开场设定已确认")
-            # Store setup context for reference
-            prev_answers = setup_answers  # so R1 can reference if needed
 
         for rnd in range(1, self.debate_rounds + 1):
             rname = ROUND_NAMES.get(rnd, f"第{rnd}轮")
@@ -415,31 +429,44 @@ class SymposiumEngine:
             self._log(f"⚔️  第{rnd}轮：{rname}")
             self._log("="*60)
 
-            # Build prompts for each client
+            # Build prompts — opponent content comes from the SAVED FILE of previous round
+            # File = ground truth; never re-extract from live page
             prompts: dict[str, str] = {}
             for i, client in enumerate(self.clients):
                 other = self.clients[(i + 1) % len(self.clients)]
-                other_full = prev_answers.get(other.name, "（对方尚未发言）")
+
+                # R1 has no previous round file; later rounds read from R(N-1) file
+                if rnd == 1:
+                    other_full = "（第一轮，对方尚未发言）"
+                else:
+                    other_full = self._read_round_file(rnd - 1, other.name)
+                    if not other_full:
+                        self._log(f"   ⚠️  未找到 R{rnd-1}_{other.name} 文件，使用空内容")
+                        other_full = "（未找到对方上一轮发言文件）"
+                    else:
+                        self._log(f"   📂 R{rnd-1}_{other.name}.txt → {len(other_full)} 字符")
 
                 template = ROUND_PROMPTS.get(rnd, ROUND_PROMPTS[5])
                 p = template.format(
                     question=question,
                     other_name=other.name,
-                    other_full=other_full,   # full original text, no summarization
+                    other_full=other_full,
                 )
                 if user_guidance:
                     p = f"【裁判引导】{user_guidance}\n\n" + p
                 prompts[client.name] = p
 
-            # Send all + wait all
+            # Step 1: send to all simultaneously
             self._send_all(prompts, round_num=rnd)
+
+            # Step 2+3: wait for BOTH to fully stop, extract + save files
+            # File naming: R{N}_{name}.txt  (saved inside _wait_all)
             answers = self._wait_all(round_num=rnd)
 
-            # API round analysis
+            # Step 4: API round analysis
             analysis = self._api_round_analysis(rnd, answers)
             rr = RoundResult(round_num=rnd, round_name=rname, answers=answers)
             all_rounds.append(rr)
-            prev_answers = answers
 
             # Display + user input
             display = self._format_round_display(rnd, rname, answers, analysis)
