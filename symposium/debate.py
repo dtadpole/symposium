@@ -39,8 +39,9 @@ def _load_yaml(name: str) -> dict:
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-_FORMAT_CFG  = _load_yaml("format.yaml")
-_CONTENT_CFG = _load_yaml("content.yaml")
+_FORMAT_CFG   = _load_yaml("format.yaml")
+_CONTENT_CFG  = _load_yaml("content.yaml")
+_PERSONA_CFG  = _load_yaml("persona.yaml")
 
 
 def _load_openclaw_anthropic() -> tuple[str | None, str]:
@@ -61,7 +62,18 @@ def _load_openclaw_anthropic() -> tuple[str | None, str]:
 # ── Constants loaded from config ──────────────────────────────────────────────
 
 REPLY_FORMAT_RULE   = _FORMAT_CFG.get("reply_format_rule", "") + "\n"
-OPENING_CONTEXT     = _CONTENT_CFG.get("opening_context", "")
+
+# Assemble opening context: persona header + content body
+_persona_identity = _PERSONA_CFG.get("debater_identity", "")
+_persona_rules    = _PERSONA_CFG.get("debater_rules", [])
+_judge_desc       = _PERSONA_CFG.get("judge_description", "")
+_rules_text       = "\n".join(f"- {r}" for r in _persona_rules)
+_persona_block    = (
+    f"{_persona_identity}\n"
+    f"辩手准则：\n{_rules_text}\n\n"
+    f"{_judge_desc}\n"
+)
+OPENING_CONTEXT     = _persona_block + _CONTENT_CFG.get("opening_context", "")
 DEFAULT_QUESTION    = _CONTENT_CFG.get("question", "")
 ROUND_NAMES: dict   = {int(k): v for k, v in _FORMAT_CFG.get("round_names", {}).items()}
 ROUND_PROMPTS: dict = {int(k): v for k, v in _FORMAT_CFG.get("round_prompts", {}).items()}
