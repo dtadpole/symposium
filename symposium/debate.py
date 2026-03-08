@@ -23,7 +23,22 @@ import anthropic
 
 from .clients.base import AIClient
 
-ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+def _load_openclaw_anthropic() -> tuple[str | None, str]:
+    """Load API key + model from OpenClaw config. Falls back to env / defaults."""
+    import os, json as _json
+    from pathlib import Path as _Path
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    try:
+        p = _Path.home() / ".openclaw/agents/main/agent/auth-profiles.json"
+        data = _json.loads(p.read_text())
+        key = key or data["profiles"]["anthropic:default"]["token"]
+        # model from openclaw config if present
+        model = data.get("defaultModel", model).replace("anthropic/", "")
+    except Exception:
+        pass
+    return key, model
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
 
@@ -83,7 +98,10 @@ class SymposiumEngine:
         self.debate_rounds = debate_rounds
         self.user_input_fn = user_input_fn
         self.log_fn = log_fn
-        self._anthropic = anthropic.Anthropic(api_key=api_key) if api_key else None
+        oc_key, oc_model = _load_openclaw_anthropic()
+        self._api_key = api_key or oc_key
+        self._api_model = oc_model
+        self._anthropic = anthropic.Anthropic(api_key=self._api_key) if self._api_key else None
 
     def _log(self, msg: str):
         if self.log_fn:
@@ -118,7 +136,7 @@ class SymposiumEngine:
         )
         try:
             msg = self._anthropic.messages.create(
-                model=ANTHROPIC_MODEL,
+                model=self._api_model,
                 max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -143,7 +161,7 @@ class SymposiumEngine:
         )
         try:
             msg = self._anthropic.messages.create(
-                model=ANTHROPIC_MODEL,
+                model=self._api_model,
                 max_tokens=4000,
                 messages=[{"role": "user", "content": prompt}],
             )
