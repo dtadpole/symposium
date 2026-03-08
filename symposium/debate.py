@@ -414,8 +414,8 @@ class SymposiumEngine:
                             snap = _page_state_snapshot(c._page, c.name)
                             cur_len = snap.get("text_len", 0)
                             baseline = _baseline_len.get(name, 0)
-                            if cur_len > baseline + 200:
-                                self._log(f"   🟡 {name} stop button missed (responded fast), text grew {cur_len - baseline} chars — treating as started")
+                            if cur_len > baseline + 5:
+                                self._log(f"   🟡 {name} stop button missed (fast response), text +{cur_len - baseline} chars — treating as done")
                                 _seen_generating.add(name)
                             else:
                                 continue  # not started yet
