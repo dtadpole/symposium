@@ -86,20 +86,23 @@ class SymposiumResult:
 class SymposiumEngine:
     def __init__(
         self,
-        clients: list[AIClient],
+        client_names: list[str],
+        analysis_client: AIClient,
         debate_rounds: int = 1,
         user_input_fn: Callable[[str], str] | None = None,
         log_fn: Callable[[str], None] | None = None,
     ):
         """
-        clients       : list of AIClient instances (sequential, not concurrent)
-        debate_rounds : how many challenge rounds
-        user_input_fn : fn(prompt_for_user) -> user's text; if None, skip user turns
-        log_fn        : fn(msg) for progress logging
+        client_names    : list of AI names to use via subprocess ["Claude","ChatGPT","Gemini"]
+        analysis_client : AIClient used sequentially for analysis + synthesis
+        debate_rounds   : how many challenge rounds
+        user_input_fn   : fn(prompt_for_user) -> user's text; if None, skip user turns
+        log_fn          : fn(msg) for progress logging
         """
-        if len(clients) < 2:
+        if len(client_names) < 2:
             raise ValueError("Need at least 2 AI clients")
-        self.clients = clients
+        self.client_names = client_names
+        self.clients = [analysis_client]   # kept for backward compat (analysis/synthesis)
         self.debate_rounds = debate_rounds
         self.user_input_fn = user_input_fn
         self.log_fn = log_fn
@@ -206,9 +209,9 @@ class SymposiumEngine:
         # ── Round 0: parallel subprocesses ────────────────────────────────────
         self._log("⚗️  Round 0: 三家 AI 并行回答（subprocess）...")
         round0 = self._ask_parallel(
-            [(c.name, question, None) for c in self.clients]
+            [(name, question, None) for name in self.client_names]
         )
-        round0 = [r for r in sorted(round0, key=lambda r: [c.name for c in self.clients].index(r.ai_name))]
+        round0 = sorted(round0, key=lambda r: self.client_names.index(r.ai_name))
 
         # ── Compare after Round 0 ─────────────────────────────────────────────
         self._log("🔍 分析共识与分歧（Claude API）...")
@@ -229,30 +232,28 @@ class SymposiumEngine:
         # ── Debate rounds ─────────────────────────────────────────────────────
         self._log(f"⚔️  辩论开始（{self.debate_rounds} 轮）...")
         debate_exchanges: list[DebateExchange] = []
-        current_answers = {r.ai_name: r.answer for r in round0}
+        current_answers: dict[str, str] = {r.ai_name: r.answer for r in round0}
 
         for rnd in range(self.debate_rounds):
             self._log(f"   第 {rnd+1} 轮（并行）...")
-            # Build all challenge tasks for this round simultaneously
-            tasks = []
-            for i, client in enumerate(self.clients):
-                defender_client = self.clients[(i + 1) % len(self.clients)]
-                defender_ans = current_answers.get(defender_client.name, "")
+            tasks = []  # (challenger_name, defender_name, prompt)
+            for i, name in enumerate(self.client_names):
+                defender_name = self.client_names[(i + 1) % len(self.client_names)]
+                defender_ans = current_answers.get(defender_name, "")
                 challenge_prompt = (
                     f"原始问题: {question}\n\n"
-                    f"{defender_client.name} 的回答:\n{defender_ans}\n\n"
+                    f"{defender_name} 的回答:\n{defender_ans}\n\n"
                     f"分歧点:\n" + "\n".join(f"- {d}" for d in disagreements) +
                     ("\n\n用户（裁判）的引导:\n" + user_guidance_r0 if user_guidance_r0 else "") +
-                    f"\n\n请从你自己的视角挑战 {defender_client.name} 的观点，要具体、工程化。"
+                    f"\n\n请从你自己的视角挑战 {defender_name} 的观点，要具体、工程化。"
                 )
-                tasks.append((client, defender_client.name, challenge_prompt))
+                tasks.append((name, defender_name, challenge_prompt))
 
-            # Parallel subprocess challenges
-            challenge_inputs = [(client.name, prompt, CHALLENGE_SYSTEM) for client, _, prompt in tasks]
+            challenge_inputs = [(name, prompt, CHALLENGE_SYSTEM) for name, _, prompt in tasks]
             challenge_responses = self._ask_parallel(challenge_inputs)
             cr_map = {r.ai_name: r.answer for r in challenge_responses}
-            results = [(client.name, defender_name, cr_map.get(client.name, "[no response]"))
-                       for client, defender_name, _ in tasks]
+            results = [(name, defender_name, cr_map.get(name, "[no response]"))
+                       for name, defender_name, _ in tasks]
 
             for challenger_name, defender_name, challenge in results:
                 debate_exchanges.append(DebateExchange(
@@ -270,7 +271,8 @@ class SymposiumEngine:
         # ── Compare after debate ───────────────────────────────────────────────
         post_debate_answers = [(ex.challenger, ex.challenge) for ex in debate_exchanges]
         c2, d2, g2, _ = self._compare(question, post_debate_answers)
-        post_debate_summary = self._format_comparison(question,
+        post_debate_summary = self._format_comparison(
+            question,
             [Round0Response(ex.challenger, ex.challenge) for ex in debate_exchanges],
             c2, d2, g2)
         self._log("\n📊 辩论后比较:\n" + post_debate_summary)
@@ -298,8 +300,10 @@ class SymposiumEngine:
              if user_guidance_r0 or user_guidance_post else "") +
             "请给出最终、最具体、工程化的综合答案。"
         )
-        synthesizer = self.clients[-1]
-        synthesis = self._ask(synthesizer, synthesis_prompt, system=SYNTHESIS_SYSTEM)
+        # Synthesis via last subprocess client
+        synth_name = self.client_names[-1]
+        synth_result = self._run_subprocess(synth_name, synthesis_prompt, SYNTHESIS_SYSTEM)
+        synthesis = synth_result.answer
         self._log(f"✓ 综合完成 ({len(synthesis)} chars)")
 
         return SymposiumResult(
@@ -312,5 +316,5 @@ class SymposiumEngine:
             debate=debate_exchanges,
             user_guidance_post_debate=user_guidance_post,
             synthesis=synthesis,
-            synthesizer=synthesizer.name,
+            synthesizer=synth_name,
         )
