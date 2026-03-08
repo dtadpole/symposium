@@ -317,16 +317,40 @@ class SymposiumEngine:
             except Exception as e:
                 self._log(f"   ⚠️  {c.name} 发送失败: {e}")
 
-    def _wait_until_text_stable(self, page, platform: str, patience: int = 3) -> None:
-        """After done signal, wait until text_len stops changing for `patience` consecutive checks."""
-        from .clients.playwright.response_waiter import _page_state_snapshot
+    def _wait_until_text_stable(self, page, platform: str, patience: int = 5) -> None:
+        """After done signal, wait until ALL streaming indicators are gone AND
+        text_len is stable for `patience` consecutive 1-second checks.
+
+        For ChatGPT specifically: also checks that stop-button / streaming
+        indicator has disappeared, not just that feedback buttons appeared.
+        """
+        from .clients.playwright.response_waiter import _page_state_snapshot, _el_exists, PLATFORM_HINTS
+
+        hints = PLATFORM_HINTS.get(platform, {})
+        stop_sels = hints.get("stop_sels", [])
+        thinking_sels = hints.get("thinking_sels", [])
+
         prev_len = 0
         stable_count = 0
-        for _ in range(20):  # max 20 × 1.5s = 30s extra
-            time.sleep(1.5)
+        for _ in range(60):  # max 60 × 1s = 60s extra wait
+            time.sleep(1.0)
             snap = _page_state_snapshot(page, platform)
             cur_len = snap.get("text_len", 0)
-            if cur_len == prev_len:
+
+            # Hard check: stop button or streaming indicator must be gone
+            still_streaming = (
+                _el_exists(page, stop_sels) or
+                _el_exists(page, thinking_sels) or
+                snap.get("stop_visible", False) or
+                snap.get("thinking_visible", False)
+            )
+            if still_streaming:
+                stable_count = 0
+                prev_len = cur_len
+                continue
+
+            # Text length must also be stable
+            if cur_len == prev_len and cur_len > 0:
                 stable_count += 1
                 if stable_count >= patience:
                     return
