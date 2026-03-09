@@ -1,85 +1,95 @@
-# 【第1轮·开篇立论】
+# 第1轮：开篇立论
 
-## 我方立场：知识库的自我进化，本质是"结构化反事实推理"的持续积累
-
----
-
-### 一、先厘清这场辩论的赛道
-
-在讨论"能自我进化的知识库"时，存在两种截然不同的设计哲学：
-
-| 路线A：**数据驱动的统计积累** | 路线B：**因果结构的反事实推理** |
-|---|---|
-| 收集更多实验结果 → 归纳规律 | 理解"为什么有效" → 推断边界条件 |
-| 进化 = 数据量增长 | 进化 = 解释力增长 |
-| 优化已知空间 | 扩展可知空间 |
-
-**我方主张路线B**，并认为在 GPU Kernel Design 这个应用场景下，路线A会导致"高速原地踏步"的系统性失败。
+## 我方立场：概率驱动的证据积累型进化架构（PBEA）
 
 ---
 
-### 二、核心主张：三层命题
+### 一、赛道锁定：这场辩论应该怎么比？
 
-**命题一：GPU Kernel 优化的知识本质是"条件依赖的因果图"，而非"参数-性能的映射表"**
+本场辩论的核心命题不是"知识库有哪些功能"，而是：
 
-一个 kernel 的性能由 memory hierarchy、warp occupancy、instruction-level parallelism 的交互决定。这些变量之间存在**非线性因果依赖**：
+**在反馈昂贵、信号稀疏的约束下，如何以最低验证成本保证每次进化是净正收益？**
+
+GPU Kernel 优化的特殊性决定了赛道：每次 benchmark 都消耗真实 GPU 资源，错误的进化比不进化的代价更高。因此，衡量方案优劣的核心标准不是"知识增长速度"，而是**知识质量 × 资源效率**的乘积。
+
+我方主张：**Knowledge Unit 的进化必须由 Bayesian Posterior 驱动，而非规则触发器。**
+
+---
+
+### 二、关键定义
+
+**Knowledge Unit（KU）**：五元组
 
 ```
-thread block size → shared memory pressure → L1 hit rate → 实际带宽利用率
-                ↘ register spilling → instruction stall cycles
+(uuid, content, context_embedding, posterior, evidence_log)
 ```
 
-如果知识库只记录"block_size=256 在 A100 上比 128 快 23%"，它在 H100 或不同 memory access pattern 下会**系统性失效**。
+- `context_embedding ∈ ℝᵈ`：描述该 KU 适用的 kernel 特征空间（访存模式、tile size、occupancy 等）
+- `posterior`：`N(μ_k, σ²_k)`，表示该 KU 在适用上下文中产生 performance delta 的置信分布
+- `evidence_log`：有序列表 `[(context_i, Δperf_i, noise_var_i)]`，每次实验结果的原始记录
 
-**命题二：自我进化的充分必要条件是"可证伪的知识单元"**
-
-知识库能否进化，取决于它的每一条知识是否携带**可被新实验推翻的假设**。
-
-- 不可进化的知识："tiling size = 64 效果好"（无条件、无边界）
-- 可进化的知识："当 arithmetic intensity > 4 FLOP/Byte 且 L2 cache > 40MB 时，tiling size = 64 最优；否则此结论无效"
-
-后者的每个前提条件都是一个**可检验的、可被反事实推翻的命题**。
-
-**命题三：进化的驱动引擎不是"更多数据"，而是"结构化的异常检测"**
-
-真正的自我进化发生在：
-1. 新实验结果**违反了现有知识的预测**
-2. 系统能**定位是哪条假设链断裂**
-3. 系统能**生成最小化修正**而非推倒重来
-
-这要求知识库具备**可追溯的推理结构**，而不只是存储结果。
+**净进化（Net Evolution）**：操作执行后，全局 knowledge base 的期望 Canary delta 提升，且统计显著性满足 p < 0.05。
 
 ---
 
-### 三、针对 GPU Kernel Design 的框架锁定
+### 三、判断标准（优先级从高到低）
 
-基于以上三个命题，我方提出本辩论的核心框架：
-
-```
-自我进化知识库 = 
-    知识表示层（因果图 + 条件边界）
-  × 实验设计层（反事实探索策略）
-  × 异常融合层（假设修正机制）
-```
-
-这三层缺一不可。单独优化任何一层都是局部解。
-
-**我方将在后续五轮中逐层展开：**
-- 第2轮：知识表示——如何编码 GPU 性能知识的因果结构
-- 第3轮：实验设计——如何主动生成"最有价值的反例"
-- 第4轮：异常融合——新数据如何触发精确的知识修正
-- 第5轮：系统边界——什么是这个框架无法处理的，以及如何应对
-- 第6轮：综合——与路线A的正面交锋与最终裁决
+1. **知识精度**：KU posterior 的校准误差（calibration error），即 μ_k 对真实 delta 的预测偏差
+2. **验证效率**：达到同等知识精度所消耗的计算资源（GPU-hours）
+3. **可解释深度**：系统能否生成可验证的 Hypothesis，而不仅是"跑快了"的记录
 
 ---
 
-### 四、一句话锁定赛道
+### 四、核心论点
 
-> **这场辩论的胜负标准是：谁的设计能在"从未见过的 GPU 架构"上，用最少的新实验，做出最可靠的优化决策。**
+#### 论点一：用 SPRT 控制 Ablation 边界——解决验证成本爆炸问题
 
-统计积累在这个标准下会输，因为它的知识不迁移。
-结构化因果推理会赢，因为它的知识**知道自己的边界**。
+传统 Ablation Study 是 fixed-size 实验，成本固定且往往过剩或不足。
+
+**我方方案：Sequential Probability Ratio Test（SPRT）作为 Ablation 的早停机制。**
+
+具体实现：
+- 零假设 H₀：该 KU 的真实 delta `μ ≤ 0`（无效）
+- 备择假设 H₁：`μ ≥ δ_min`（有意义的最小提升阈值，如 +2% throughput）
+- 每跑一次 benchmark，计算似然比 `Λ_n = ∏ p(xᵢ | H₁) / p(xᵢ | H₀)`
+- 当 `Λ_n ≥ B`（接受 H₁）或 `Λ_n ≤ A`（接受 H₀）时停止
+
+**对"无 real delta"实验的处理**：接受 H₀ 不是失败，而是高质量信号——将该 KU 标记为 `evidence: null_result`，更新 posterior 向 μ=0 收缩，并记录其 `context_embedding` 作为"此类场景该策略无效"的负样本。这个负样本对 Merge/Archive 决策具有关键价值。
+
+**SPRT 的理论保证**：在 δ_min 和容忍的 Type I/II 错误率 (α, β) 确定后，其期望样本数 E[N] 可证明为最优（Wald 1945），比 fixed-n 减少约 50% 样本。
 
 ---
 
-*等待对方回应，或进入第2轮展开。*
+#### 论点二：以 EIG/Cost 排序主动实验——解决 Hypothesis 深度不足问题
+
+**触发条件**（知识深度不足的判断）：
+- `posterior.σ² > σ²_threshold`（置信度低）
+- 且该 KU 在最近 N 次调用中被使用超过 k 次（高频使用但低置信）
+
+触发后，执行 **Hypothesis Decomposition**，实验优先级排序：
+
+```
+priority(eᵢ) = EIG(eᵢ) / cost(eᵢ)
+             = [H(posterior_before) - E[H(posterior_after | eᵢ)]] / GPU_hours(eᵢ)
+```
+
+**No-regret 实验的定义**：
+- `cost(eᵢ) < C_floor`：无论结果如何都执行
+- `cost(eᵢ) > C_ceiling`：只在 `EIG > EIG_threshold` 时执行
+- 中间区间：按 EIG/cost 排队，按剩余 budget 滚动执行
+
+**递归子 Hypothesis 的成本控制**：子 Hypothesis 继承父级 budget 的 1/r（r > 1，建议 r=2），总代价 ≤ 2 × 顶层实验成本，防止递归爆炸。
+
+---
+
+### 五、我方预判的本场真正争议焦点
+
+**焦点一**：当 local micro-benchmark 与 global Canary 的 delta 不相关时，以 local feedback 驱动进化是否可靠？我方认为可通过训练校准映射 `f: local_delta → Canary_delta_estimate` 缓解，但这本身是需要验证的假设——这是本场最核心的工程张力。
+
+**焦点二**：Bayesian 框架要求 prior 合理，但 GPU kernel 优化的 prior 从哪来？冷启动时 posterior 是否退化为纯随机？**这是我方在后续轮次需要防守的薄弱点，也是对方最可能主攻的方向。**
+
+---
+
+**我方核心主张一句话版本**：
+
+> 知识库的自我进化，本质上是一个在资源约束下的贝叶斯更新问题。任何不维护置信分布、不控制验证成本的方案，都只是在做有记录的试错，而非真正的进化。

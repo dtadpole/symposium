@@ -1,110 +1,104 @@
 # 【第1轮：开篇立论】
 
-## 我方立场：**以"可证伪的假说单元"为核心，构建假说驱动的自进化知识库**
+---
+
+## 一、明确立场
+
+我方核心主张：**GPU Kernel 自动优化系统的知识库自我进化，应以"结构化假设驱动"为核心范式，而非依赖被动积累与事后验证。**
+
+具体而言：知识库的每一次进化操作，必须由一个显式的、可证伪的 Hypothesis 发起，而非由性能数字的被动变化触发。系统的核心能力不是"记录什么有效"，而是"理解为什么有效，并知道下一步该验证什么"。
+
+这与另一种可能的立场——"以 Canary 为中心、累积足够变化后再验证"的被动进化模型——形成直接对立。
 
 ---
 
-### 一、先定赛道：这场辩论的核心争点是什么
+## 二、关键定义
 
-在开始论证之前，我必须先说清楚"这场辩论应该按什么比"。
+**Knowledge Unit（KU）**：一个可证伪的优化假设卡片，包含：
+- `hypothesis`：优化为何有效的结构性解释（不是"快了3%"，而是"减少了 bank conflict 因为…"）
+- `applicability_condition`：在哪类 kernel / pattern 下适用
+- `evidence_set`：支持或反驳该假设的实验记录
+- `confidence_score ∈ [0,1]`：基于证据强度的量化置信度
+- `lifecycle_state`：Created / Revised / Merged / Split / Superseded / Archived
 
-本题问的是"自我进化的知识库"，但"进化"这个词有两种根本不同的理解：
+**进化（Evolution）**：KU 的状态转换，当且仅当有新证据导致 `confidence_score` 或 `applicability_condition` 发生显著变化时触发，而非时间驱动或频率驱动。
 
-- **理解A（被动积累式）**：系统运行 → 产生性能数据 → 数据驱动知识更新 → 知识库增长。这是一种"数据驱动的记录系统"。
-
-- **理解B（主动假说式）**：系统提出假说 → 设计实验验证 → 根据证伪结果修订假说 → 知识库进化。这是一种"科学方法论驱动的推理系统"。
-
-**我方的核心主张是：只有理解B才是真正意义上的自进化。理解A本质上是一个精致的日志系统，而非进化系统。**
-
-判断标准我提前亮出：**一个能"自我进化"的知识库，必须具备主动减少自身不确定性的能力，而不仅仅是被动积累观测结果。**
+**净进化（Net Evolution）**：一次状态转换操作后，系统在 held-out local benchmark 上的期望性能不下降，且知识结构的可解释性（measurable by hypothesis depth）不退化。
 
 ---
 
-### 二、核心方案：假说驱动的知识进化架构（Hypothesis-Driven Evolution）
+## 三、判断标准
 
-我方的方案以一个核心数据结构为轴心：
+本场辩论的胜负标准应为：**哪个方案能在资源受限条件下，以最少的无效实验代价，最大化知识库的"可迁移解释能力"**——即不只是在已见过的 kernel 上表现好，而是能将 KU 中的 hypothesis 迁移到新 kernel 并产生可预测的优化收益。
 
-**每一个 Knowledge Unit = 一个可证伪的假说（Falsifiable Hypothesis）**
+这个标准由三个维度构成：
+1. **验证效率**：每单位计算资源带来的 confidence 提升
+2. **解释深度**：KU 中 hypothesis 的可证伪程度与因果链完整性
+3. **迁移能力**：KU 在 out-of-distribution kernel 上的预测准确率
 
-具体定义如下：
+---
 
+## 四、两个核心论点
+
+### 论点一：反馈机制必须在 KU 层面闭环，而非依赖 Canary 全局信号
+
+Canary Query Set 是长期 ground truth，但它有两个根本性局限：
+- 运行代价高，不可频繁触发
+- 单次 KU 变化在 Canary 上几乎不可见（信号被淹没在噪声中）
+
+因此，**Canary 不能作为 KU 级别进化的判断依据**，只能作为系统整体健康度的长期校验。
+
+我方方案：每个 KU 维护一个轻量级的 **Local Verification Set（LVS）**——针对该 KU 的 `applicability_condition` 精心选取的 3-5 个 micro-benchmark，专门用于验证该 KU 的 hypothesis 是否成立。
+
+进化触发逻辑：
 ```
-Knowledge Unit {
-  UUID: <唯一标识>
-  Hypothesis: "在 [条件C] 下，对 Kernel K 应用优化策略 S，
-               预期可将 [指标M] 提升 [量化范围 δ±ε]"
-  Evidence: [实验记录列表]
-  Confidence: 基于 Evidence 计算的置信度
-  Applicability_Scope: 该假说适用的 Kernel 特征空间
-  Status: Created / Revised / Merged / Split / Superseded / Archived
-  Parent_UUID: <来自哪张卡片>
-  Falsification_Condition: "当观测到 [X] 时，本假说应被修订或废弃"
-}
+if Δconfidence(KU) > θ_trigger (e.g., ±0.15):
+    → 触发状态转换评估
+    → 在 LVS 上运行 targeted ablation
+    → 根据结果更新 evidence_set 和 lifecycle_state
 ```
 
-**关键设计点：** 每张卡片不只是记录"某策略有效"，而是记录"在什么条件下有效、预期效果是什么、如何才能证伪它"。这使得每张卡片天然具有**可验证性**和**可被超越性**。
+这样将验证成本从 O(全局 Canary) 降低到 O(单个 KU 的 LVS 规模)，且每次验证的信号都直接指向该 KU 的 hypothesis。
 
 ---
 
-### 三、进化机制：如何触发状态转换
+### 论点二：系统必须具备主动实验设计能力，且以"no-regret 实验优先"为排序原则
 
-我方的进化触发链如下：
+当 KU 的 hypothesis 深度不足时（即只知道"快了"，不知道"为什么快"），系统不应等待，而应主动生成 sub-hypothesis 并设计验证实验。
 
-**触发层（Trigger Layer）**：
-1. 新的 Kernel 优化实验完成 → 产生性能数据
-2. 数据与某张卡片的预期（δ±ε）对比
-3. 若观测值落在置信区间内 → 更新 Confidence（Evidence 追加）
-4. 若观测值显著偏离预期 → 触发 Falsification → 启动 Revision 流程
+**触发条件**（何时启动主动实验）：
+```
+if KU.hypothesis_depth < δ_min  // hypothesis 缺乏因果链
+OR KU.confidence_score ∈ (0.35, 0.65)  // 证据高度不确定
+→ 触发 Hypothesis Deepening Protocol
+```
 
-**状态转换规则**：
-- `Revised`：假说条件边界被收窄或扩大，CoW 产生新卡片
-- `Split`：发现假说在不同 Kernel 类型上行为不一致，拆分为两张范围更精确的卡片
-- `Merged`：两张卡片的 Applicability_Scope 有重叠且结论一致，合并为更一般化的卡片
-- `Superseded`：新卡片在所有维度上覆盖并超越旧卡片
-- `Archived`：连续N次实验无法产生 real delta，或被 Superseded
+**实验优先级排序**（如何分配资源）：
 
-**核心优势**：状态转换不是人工触发，而是由**假说与观测的偏差**自动触发，这才是"自进化"的真实含义。
+定义每个候选实验 $e_i$ 的优先级得分：
 
----
+$$\text{Priority}(e_i) = \frac{\mathbb{E}[\Delta \text{confidence}(e_i)] \cdot \text{transfer\_potential}(e_i)}{\text{cost}(e_i)}$$
 
-### 四、反馈机制：如何确保净进化而非净退化
+其中：
+- $\mathbb{E}[\Delta \text{confidence}]$：预期置信度提升（基于历史相似实验估计）
+- $\text{transfer\_potential}$：该实验结论能被复用到多少其他 KU
+- $\text{cost}$：计算资源消耗的归一化估计
 
-这是本题最难的部分，我方的设计分三层：
+**No-regret 实验的定义**：满足以下条件的实验：
+- $\text{cost}(e_i) < \epsilon_{budget}$（预算阈值以下）
+- 无论结果如何（validate 或 falsify），都能更新至少一个 KU 的 `evidence_set`
+- 即使 falsify，也产生有价值的 negative evidence（可触发 Superseded 或 Archived 转换）
 
-**第一层：局部验证（Ablation Study 的轻量化替代）**
-
-由于 Canary 代价高昂，不能频繁触发，我方引入**影子实验（Shadow Experiment）**机制：
-
-- 每次 Revision 或 Merge 操作，系统自动在**当前 Applicability_Scope 内**挑选代表性的 micro-benchmark（不是完整 Canary），运行针对该卡片变化的最小化消融实验
-- 目标不是全局验证，而是验证"这次 CoW 操作没有引入局部退化"
-- 成本控制：micro-benchmark 的规模由 Applicability_Scope 的大小自适应决定
-
-**第二层：全局一致性检查（Canary 作为长期信号）**
-
-- 每隔固定周期（或累积 K 次 Revision 后），触发一次 Canary
-- Canary 结果不直接回滚某张卡片，而是触发**全局归因分析**：哪些 Knowledge Unit 的变化与 Canary 指标的变动最相关
-- 这是一个反向追溯机制，而非实时反馈机制
-
-**第三层：不确定性预算（Uncertainty Budget）**
-
-- 系统维护一个全局的 Uncertainty Budget：总知识量受限时，优先保留置信度高的卡片
-- 当知识库规模超过上限时，Archived 状态的卡片按置信度排序，低置信度的先被压缩
+高成本、收益不确定的实验（如全 kernel 重写级别的验证）必须满足 $\text{Priority}(e_i) > \tau_{high\_cost}$ 才可进入执行队列，且需锁定预算配额。
 
 ---
 
-### 五、为什么这是"赛道锁定"
+## 五、核心焦点
 
-我方的核心框架确立了以下判断标准，这将贯穿后续五轮：
+本场真正的争议在于以下两点：
 
-1. **可证伪性**：一个 Knowledge Unit 如果无法说明"在什么情况下自己是错的"，它就不是真正的知识，只是观测记录
-2. **主动性**：进化系统必须能主动设计实验，而不只是等待数据
-3. **净进化可验证性**：每次操作必须有机制证明自己没有引入退化
+**焦点一：进化的驱动源是"假设驱动"还是"信号驱动"？**
+我方认为必须先有 hypothesis 才能设计有效实验；对方可能认为只要累积足够多的性能信号，系统自然涌现出有效的 KU。这是根本性的架构分歧。
 
-**我向对方提出的核心挑战：**
-
-> 如果你的方案没有"可证伪性"这一设计，你如何区分"知识在增长"和"错误在积累"？
-> 如果你的方案依赖 Canary 作为主要反馈，你如何处理 Canary 不敏感窗口期内的退化风险？
-
----
-
-以上是我方第一轮的完整立论。立场明确：**假说驱动的自进化知识库，以可证伪的 Knowledge Unit 为核心，以假说-验证-修订循环为进化引擎。**
+**焦点二：在资源极度受限时，"验证覆盖"与"假设深度"应如何权衡？**
+是优先广度（覆盖更多 KU 做浅层验证）还是优先深度（对少数 KU 做彻底的因果链理解）？我方立场是：没有深度的宽度是脆弱的，

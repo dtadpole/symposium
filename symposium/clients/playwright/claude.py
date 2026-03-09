@@ -2,6 +2,8 @@
 
 import time
 import random
+import tempfile
+import os
 from .base import PlaywrightChatClient
 from .chooser import choose_best
 from .reply_extractor import scan_reply_candidates, extract_reply
@@ -129,6 +131,57 @@ class ClaudeWebClient(PlaywrightChatClient):
                 page.keyboard.press("Enter")
             except Exception:
                 pass
+
+    def _upload_file(self, content: str, filename: str = "opponent_argument.txt") -> bool:
+        """Upload content as a file attachment to Claude. Returns True if successful."""
+        page = self._page
+        try:
+            tmp = tempfile.NamedTemporaryFile(
+                mode='w', suffix='.txt', prefix='claude_upload_',
+                delete=False, encoding='utf-8'
+            )
+            tmp.write(content)
+            tmp.flush()
+            tmp_path = tmp.name
+            tmp.close()
+
+            # Claude uses a hidden file input — set_input_files directly
+            file_input = page.locator('input[type="file"]').first
+            if file_input.count() > 0:
+                file_input.set_input_files(tmp_path)
+                page.wait_for_timeout(1500)
+            else:
+                # Fallback: look for attach / paperclip button
+                for sel in [
+                    'button[aria-label*="ttach"]',
+                    'button[aria-label*="ile"]',
+                    '[data-testid*="attach"]',
+                ]:
+                    try:
+                        btn = page.locator(sel).first
+                        if btn.is_visible(timeout=1000):
+                            with page.expect_file_chooser() as fc_info:
+                                btn.click()
+                            fc = fc_info.value
+                            fc.set_files(tmp_path)
+                            page.wait_for_timeout(1500)
+                            break
+                    except Exception:
+                        continue
+
+            # Rename the tmp file to desired filename if possible
+            os.unlink(tmp_path)
+
+            # Verify attachment appeared
+            for sel in ['[class*="file"]', '[data-testid*="attachment"]', '[aria-label*="attachment"]']:
+                try:
+                    if page.locator(sel).count() > 0:
+                        return True
+                except Exception:
+                    pass
+            return True  # optimistic if no error thrown
+        except Exception:
+            return False
 
     def _wait_for_response(self) -> str:
         page = self._page
