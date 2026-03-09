@@ -298,6 +298,14 @@ class SymposiumEngine:
             full = REPLY_FORMAT_RULE + prompt
             self._log(f"   ✉️  发送给 {c.name}...")
             try:
+                # Capture pre-send baseline (before prompt is sent to the page)
+                try:
+                    from .clients.playwright.response_waiter import _page_state_snapshot as _pss
+                    snap = _pss(c._page, c.name)
+                    c._pre_send_baseline = snap.get("text_len", 0)
+                except Exception:
+                    c._pre_send_baseline = 0
+
                 # Upload opponent's content as file attachment (both Claude and ChatGPT)
                 if "────────────────────────────────────────" in full:
                     m = re.search(
@@ -398,18 +406,16 @@ class SymposiumEngine:
 
         # Phase-1 gate: track which clients have started generating.
         # Prevents false "done" from stale UI (e.g. ChatGPT Copy button always present).
-        # Fallback: if check_done() is True AND text grew significantly, stop was missed.
+        # Fallback: if stop button missed, require text grew > 300 chars from PRE-SEND baseline.
         _seen_generating: set[str] = set()
-        _baseline_len: dict[str, int] = {}
 
-        # Record baseline text length for each client right now (before responses)
+        # Use baseline captured in _send_all() (before sending prompt).
+        # Fallback to page snapshot now if not set.
         from .clients.playwright.response_waiter import _el_exists, PLATFORM_HINTS as _PH, _page_state_snapshot
+        _baseline_len: dict[str, int] = {}
         for c in self.clients:
-            try:
-                snap = _page_state_snapshot(c._page, c.name)
-                _baseline_len[c.name] = snap.get("text_len", 0)
-            except Exception:
-                _baseline_len[c.name] = 0
+            # _pre_send_baseline set by _send_all(); guarantees BEFORE prompt was sent
+            _baseline_len[c.name] = getattr(c, '_pre_send_baseline', 0)
 
         while pending and (time.time() - start) < HARD_TIMEOUT:
             for name in list(pending.keys()):
@@ -435,7 +441,7 @@ class SymposiumEngine:
                             snap = _page_state_snapshot(c._page, c.name)
                             cur_len = snap.get("text_len", 0)
                             baseline = _baseline_len.get(name, 0)
-                            if cur_len > baseline + 5:
+                            if cur_len > baseline + 300:
                                 self._log(f"   🟡 {name} stop button missed (fast response), text +{cur_len - baseline} chars — treating as done")
                                 _seen_generating.add(name)
                             else:
