@@ -1,104 +1,106 @@
-# 【第1轮：开篇立论】
+## 【第1轮：开篇立论】
 
 ---
 
-## 一、明确立场
+### 🏳️ 我方立场声明
 
-**我方核心主张：自我进化的知识库，本质是一个"置信度驱动的实验预算分配系统"。**
+我方的核心主张是：
 
-进化不是自动发生的状态转换，而是一个受控的科学过程：每一次状态变更（Revised / Merged / Superseded 等）都必须有置信度背书，每一次实验都必须经过预算评估。知识库的质量不由知识的数量决定，而由**每一个 Knowledge Unit 的置信度是否可信、是否经过足够验证**决定。
+**一个能够自我进化的 GPU Kernel 知识库，其设计核心不是"收集更多知识"，而是"用最低成本维护知识的因果可信性"。**
 
-这场辩论应该按以下维度来比：**在资源受限、Canary 信号稀疏的条件下，哪个设计能让每一次进化操作的期望收益最大、退化风险最小。**
-
----
-
-## 二、关键定义
-
-**Knowledge Unit（KU）**：一张带唯一 UUID 的知识卡片，包含：
-- `hypothesis`：优化策略的因果陈述（"为什么快"，而非只是"快了多少"）
-- `confidence_score ∈ [0, 1]`：基于实验证据的置信度估计
-- `evidence_log`：所有支撑实验的记录（含"无 real delta"的实验）
-- `scope`：适用边界（硬件型号、算子类型、内存布局等）
-- `state`：生命周期状态
-
-**净进化（Net Evolution）**：一次状态变更操作，当且仅当：
-`E[Δperformance | mutation] - cost(experiment) > 0`
-即期望性能增益扣除实验成本后为正，才构成净进化。
-
-**置信度（Confidence）**：不是模糊的"我们比较确定"，而是：
-`confidence = f(n_experiments, effect_size, variance, scope_coverage)`
-具体为：通过多次独立实验、效果量显著性检验（effect size test）、跨 scope 覆盖度三者的加权函数给出的数值。
+换句话说，这场辩论的赛道应该是：**知识库的进化机制，本质上是一个受资源约束的因果推断问题，而非一个搜索或记忆扩张问题。**
 
 ---
 
-## 三、判断标准
+### 🔑 关键定义
 
-本场辩论的最优方案，应满足以下三个可量化标准：
+**知识单元（Knowledge Unit）的"有效性"定义：**
+一个 Knowledge Unit 是有效的，当且仅当它满足以下两个条件：
+1. **因果可信**：它记录的不仅是"做了X之后快了Y%"，而是一个可检验的因果假设 `H: context C → action A → effect Δperf`，且这个假设在受控条件下能被复现。
+2. **边界已知**：它明确标注了适用范围（特定 kernel 类型、硬件架构、workload shape），即知道在什么情况下它**不适用**。
 
-1. **进化精度**：状态变更操作中，净退化率 < 阈值（例如 5%）
-2. **实验效率**：单位计算预算产生的置信度提升量最大化
-3. **知识可解释性**：每个 KU 能回答"为什么"，而非只记录"是什么"——因为不可解释的知识无法在新场景泛化
-
----
-
-## 四、两个核心论点
-
-### 论点一：无 real delta 的实验是知识库的"负资产"，但可以转化为"边界约束"
-
-当一次实验跑完发现无显著差异（Δ < ε），多数方案选择丢弃或忽略这条记录。**这是错误的。**
-
-我方方案：**"零收益实验"必须写入 KU 的 `evidence_log`，并触发 scope 边界收缩。**
-
-具体机制：
-- 定义 `null_delta_threshold ε`（例如 p > 0.05 或 speedup < 1%）
-- 若实验结果落入零区间，则不触发 KU 状态升级，但触发 `scope_shrink` 操作：将该 KU 的适用范围从 `scope_A`（包含此次失效场景）收缩为 `scope_A \ {failed_context}`
-- 积累足够的 scope_shrink 记录后，触发 `Split`：将一个宽泛的 KU 拆分为多个 scope 精确的子 KU
-
-**这样，无效实验不是浪费，而是在精确化知识的适用边界。**
+**"净进化"的定义：**
+一次知识库操作（Revised / Merged / Split / Superseded）是净进化，当且仅当：
+操作后知识库在 **代理指标集（Proxy Metric Set）** 上的期望预测精度提升，同时没有引入新的未验证假设负债（Hypothesis Debt）。
 
 ---
 
-### 论点二：主动实验设计必须通过"假设树 + 预算评分"控制递归成本
+### ⚖️ 判断标准
 
-当系统只有一个速度数字、不理解"为什么快"时，不能无限制地递归产生 sub-hypothesis。必须有一个停止条件和优先级函数。
+本场辩论应按以下标准评判方案优劣：
 
-我方方案：**构建 Hypothesis Tree，每个节点有 `experiment_value` 评分，系统按评分做贪心实验排序。**
+1. **因果可信度**：方案是否能区分"相关性优化记录"和"因果优化知识"？
+2. **资源效率**：在验证预算（计算资源、时间）受限下，能否最大化"每单位成本获得的可信知识增量"？
+3. **可扩展性**：随着知识库增长，进化机制是否仍然可控，不会因知识爆炸而退化？
 
-具体机制：
+---
 
-**Hypothesis Tree 结构：**
+### 📌 核心论点一：进化的触发必须基于"假设债务"而非"性能信号"
+
+**立场**：Knowledge Unit 的进化触发，不应该由性能数字驱动，而应该由"假设债务（Hypothesis Debt）"的积累驱动。
+
+**具体机制**：
+
+每个 Knowledge Unit 维护一个结构化字段：
 ```
-Root Hypothesis H₀: "Tiling size T=128 improves throughput"
-├── Sub-H₁: "T=128 reduces cache miss rate" (cost: low, verifiability: high)
-├── Sub-H₂: "T=128 improves warp occupancy" (cost: medium, verifiability: medium)
-└── Sub-H₃: "T=128 reduces memory bank conflict" (cost: high, verifiability: low)
+HypothesisDebt = {
+  unverified_conditions: List[condition],  # 未被验证的适用条件
+  conflicting_units: List[UUID],           # 与之矛盾的其他KU
+  coverage_gap: float,                     # 当前验证覆盖的workload比例
+  last_validated_at: timestamp
+}
 ```
 
-**实验价值评分函数：**
-`V(H) = (prior_confidence_gain × scope_coverage) / (compute_cost × time_cost)`
+**进化触发条件（精确定义）**：
+- `len(conflicting_units) > 0`：触发 **Merge / Superseded** 候选流程
+- `coverage_gap > θ_gap`（阈值，如 0.6）：触发 **主动实验设计** 流程
+- `last_validated_at` 超过时效窗口 `T_stale`（如跨硬件代际）：触发 **Revised** 候选
 
-- `prior_confidence_gain`：预期能提升多少置信度（基于历史相似实验的统计）
-- `scope_coverage`：验证结果能覆盖多少未来场景
-- `compute_cost` + `time_cost`：实验的实际消耗
-
-**触发条件（何时需要主动实验）：**
-当 KU 的 `confidence_score < θ_min`（例如 0.6）且 `hypothesis` 字段为空或仅有"观测结果"而无因果陈述时，系统将该 KU 标记为 `needs_explanation`，并自动从 Hypothesis Tree 中选取 `V(H)` 最高的子假设，优先安排实验。
-
-**No-regret 实验的判断标准：**
-当 `compute_cost < C_low` 且 `prior_confidence_gain > G_min` 时，该实验被标记为 no-regret，可直接执行无需审批。
-反之（高成本、低期望收益），需人工或高层策略介入决策。
-
-**递归终止条件：**
-`depth(sub-hypothesis) ≤ D_max`，且 `V(H) > V_threshold`，否则剪枝，不产生孙 hypothesis。
+**为什么这优于性能信号触发**：
+性能信号（如 benchmark 数字）是结果，不是原因。
+如果系统只追性能数字，它会积累大量"在某个benchmark上跑得快，但不知道为什么"的记录，这些记录在新场景下无法迁移，是知识库的"负债"而非"资产"。
+假设债务触发机制强迫系统在进化之前先理解"为什么"，从而保证知识的因果可信性。
 
 ---
 
-## 五、核心焦点
+### 📌 核心论点二：反馈机制应采用"分层代理指标 + 延迟 Canary 锚定"的双轨设计
 
-**我方认为，本场真正的争议集中在以下两点：**
+**立场**：鉴于 Canary 的高成本和低频特性，系统必须建立一套**分层代理指标体系**，作为日常进化的短期反馈；同时用 Canary 作为长期锚点进行校准，而非直接驱动。
 
-**焦点一：进化的最小证据门槛应该是多少？**
-——多少实验、多高的 effect size，才能让一次状态变更从 `Revised` 升格为稳定知识？不同方案对这个门槛的设定，决定了整个系统的保守程度与进化速度的权衡。
+**具体机制——双轨反馈设计**：
 
-**焦点二：Canary 信号稀疏时，局部置信度能否代理全局质量？**
-——Canary 成本高、不能频繁触发，那在 Canary 两次运行之间，系统靠什么判断自己是在净进化？我方认为，局部 confidence_score
+**轨道一（高频代理层）**：
+每次知识进化操作后，在一个轻量 Proxy Benchmark Set 上运行验证：
+- Proxy Set 是 Canary 的子集或结构相似的小样本
+- 定义代理精度指标：`proxy_score(KU) = Σ_i w_i · (predicted_Δperf_i - actual_Δperf_i)²`（加权预测误差）
+- 进化操作被接受的条件：`proxy_score_new < proxy_score_old`（即代理指标上有改进）
+
+**轨道二（低频 Canary 校准层）**：
+- Canary 不用于触发单次进化，而用于**定期校准代理指标的权重** `w_i`
+- 具体：每次 Canary 运行后，执行回归分析：`w_i_new = w_i_old · (Canary_delta / Proxy_predicted_delta)`
+- 如果 Canary 与 Proxy 预测严重偏离（`|Canary_delta - Proxy_predicted_delta| > ε`），触发"代理失效警报"，重新设计 Proxy Set
+
+**对"无效实验"的处理**：
+当 Ablation 实验结果为"无显著差异"（`|Δperf| < σ_noise`），不丢弃，而是将其作为**边界知识**记录：
+```
+KU.boundary_evidence.append({
+  "context": experiment_context,
+  "result": "no_effect",
+  "confidence": statistical_power
+})
+```
+这是**no-regret 操作**——它缩小了未来实验的搜索空间，本身就是知识增量。
+
+---
+
+### 🎯 我方认为本场真正的争议焦点在：
+
+**焦点一**：进化的触发应该是**结果驱动（performance-first）** 还是 **理解驱动（hypothesis-first）**？
+——我方坚持 hypothesis-first，对方可能主张先跑出结果再归因。
+
+**焦点二**：在资源约束下，"宁可少进化但每次可信"和"快速迭代但接受部分噪声"，哪种策略的长期期望更高？
+——这是本场的核心权衡，两方方案的真实分歧所在。
+
+---
+
+*我方已确立立场框架，等待对方开篇立论及裁判引导。*
