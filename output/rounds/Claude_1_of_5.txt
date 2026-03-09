@@ -1,102 +1,91 @@
 # 第1轮：开篇立论
 
-## 一、明确立场
-
-**我方核心主张：自我进化知识库的设计应以「信息价值驱动」（Information-Value-Driven，IVD）为核心架构。**
-
-即：每一次进化操作（Revised / Merged / Split / Superseded / Archived）和每一个主动实验，都必须通过「预期信息增益 / 执行成本」的比值（EVOI ratio）来决策。知识单元不只存储"优化策略是什么"，还必须存储"我们对这条策略的置信度是多少，以及在哪些条件下有效"。
+## 我方立场：因果优先的贝叶斯进化架构
 
 ---
 
-## 二、关键定义
+### 一、核心主张
 
-**Knowledge Unit (KU) 的最小表示为一个五元组：**
+我方主张：知识库的进化机制应以**因果理解（causal understanding）为第一目标**，以**贝叶斯不确定性（Bayesian uncertainty）为核心度量**，以**主动实验设计（active experimentation）为进化引擎**。
 
-```
-KU = (uuid, hypothesis H, applicability_condition C, confidence β ∈ [0,1], evidence_log E[])
-```
-
-- **H**：可证伪的优化假设（如"对 M=N=K=4096 的 GEMM，用 warp-level tiling + shared memory padding 可提升 15%"）
-- **C**：适用条件（硬件架构、矩阵 shape、occupancy 约束等）
-- **β**：贝叶斯后验置信度，初始由先验 + 首次实验设定
-- **E[]**：所有实验结果的证据列表，append-only
-
-**净进化（Net Evolution）** 定义为：执行一次进化操作后，全局知识库的期望预测准确率 E[Acc(KB)] 严格上升。
-
-**判断标准（Evaluation Criterion）**：哪个方案在资源受限下，能让 E[Acc(KB)] 的增长速率更快、更可靠，哪个方案更优。
+**一句话定位：不是收集更多"什么有效"的事实，而是理解"为什么有效"的机制。**
 
 ---
 
-## 三、判断标准
+### 二、关键定义
 
-本场辩论的评判标准应为：
+**Knowledge Unit (KU)**：一个四元组 `(H, E, C, U)`：
+- **H**：Hypothesis——对优化策略的因果解释（如"增大 tile size 在 memory-bound kernel 上有效，因为提升了 L2 reuse rate"）
+- **E**：Evidence Set——支撑该 Hypothesis 的实验结果集合 `{(config_i, perf_i, context_i)}`
+- **C**：Confidence Score——贝叶斯后验概率 `P(H | E)`
+- **U**：Uncertainty——认知不确定性 `σ²`，区分 aleatoric（噪声）vs epistemic（知识缺口）
 
-> 在固定实验预算 B（计算资源 + 时间 + 知识容量）下，哪种机制能以最高期望收益驱动净进化，同时对"无效实验"有明确的处置路径。
+**净进化（Net Evolution）**：一次 KU 状态转换操作 `op`，满足：
 
-不接受"最终效果好就行"的事后归因评判——因为 Canary 的滞后性决定了我们必须在 Canary 触发之前就有局部反馈的决策机制。
+```
+ΔKnowledge_Value(op) = ΔC × W_coverage + ΔDepth × W_depth - Cost(op) > 0
+```
+
+其中 `W_coverage` 权重适用范围，`W_depth` 权重因果解释深度。
 
 ---
 
-## 四、两个核心论点
+### 三、判断标准
 
-### 论点一：进化触发应由置信度阈值 + 证据积累联合驱动
+本场辩论应按以下三个维度评判方案优劣：
 
-KU 的生命周期转换不应由外部事件随机触发，而应由其内部置信度 β 的动态变化触发，规则如下：
-
-```
-β_new = BayesUpdate(β_old, new_evidence)
-```
-
-触发规则：
-- `β > 0.85` 且 `evidence_count ≥ 3` → 状态可从 `Created → Revised`（稳定强化）
-- `β < 0.2` 且 `evidence_count ≥ 2` → 触发 `Superseded` 或 `Archived` 流程
-- 两个 KU 的 `applicability_condition C` 高度重叠（`Jaccard(C1,C2) > 0.7`）且 hypothesis 方向一致 → 触发 `Merged` 候选
-- 单一 KU 在不同 C 子集上 β 出现双峰分布 → 触发 `Split` 候选
-
-**这个机制的关键优点**：任何状态转换都有可回溯的置信度变化记录，而非"某次实验跑完就删掉"，从而满足 Append-only 约束的同时保持完整审计链。
+| 维度 | 定义 | 为何重要 |
+|------|------|----------|
+| **可迁移性** | KU 在新 kernel / 新 GPU 架构上能否复用 | 因果解释强的 KU 迁移成本低 |
+| **资源效率** | 单位计算资源产生的知识增益 `ΔKnowledge_Value / Cost` | GPU 时间不是免费的 |
+| **防退化能力** | 在 Canary 信号稀疏时，能否保证进化操作不引入 regression | 系统必须能在低监督下安全运行 |
 
 ---
 
-### 论点二：实验优先级应由 EVOI（Expected Value of Information）排序，解决 Ablation 成本与主动实验设计的双重挑战
+### 四、两个核心论点
 
-定义单个实验 `e` 的 EVOI：
+#### 论点一：Epistemic Uncertainty 是触发进化的最优信号
+
+进化状态转换的触发不应依赖"跑了多少次实验"，而应依赖 KU 的认知不确定性 `σ²_epistemic`。
+
+**触发条件（工程化）：**
 
 ```
-EVOI(e) = ΔE[Acc(KB) | e 完成] × coverage(e) - cost(e)
+if σ²_epistemic(KU_i) > θ_trigger:
+    → 触发主动实验设计
+elif confidence_conflict(KU_i, KU_j) > δ:
+    → 触发 Merge 或 Superseded 流程
+elif coverage_overlap(KU_i, KU_j) > ρ AND same_causal_root:
+    → 触发 Merge
+```
+
+`θ_trigger` 自适应：`θ_trigger = median(σ²_epistemic) × α`，`α` 根据当前计算预算动态调节。
+
+#### 论点二：No-regret 实验过滤器是解决成本-验证权衡的唯一可行路径
+
+并非所有实验都值得跑。我方提出**实验优先级函数**：
+
+```
+Priority(exp) = E[ΔC | exp] × Transferability(exp) / Cost(exp)
 ```
 
 其中：
-- **ΔE[Acc(KB)]**：实验完成后知识库预期准确率提升量（对于置信度接近 0.5 的 KU，这个值最大；对已确定 KU，接近 0）
-- **coverage(e)**：该实验结论能覆盖的未来 query 比例（用历史 query distribution 估计）
-- **cost(e)**：GPU 计算时间 × 单位资源成本
+- `E[ΔC | exp]`：期望置信度提升，用 Bayesian Expected Information Gain (EIG) 估算
+- `Transferability(exp)`：实验结论能覆盖多少相似 KU / kernel context
+- `Cost(exp)`：GPU 时间 + 知识容量消耗
 
-**针对挑战一（Ablation 成本）**：当 `EVOI(e) < threshold_min`（如 `0.01 × B_total`），该实验直接标记为 `no-dispatch`。"无效实验"（无 real delta）的证据并非浪费——它将对应 KU 的 β 向 0.5 收敛，触发该 KU 进入 `low-confidence` 队列，等待更好的实验设计。
+**No-regret 阈值**：若 `Priority(exp) > γ`（γ 为全局实验队列的中位优先级），则进入执行队列；否则挂起为"待定假说"，等待 batch 触发或 Canary 信号激活。
 
-**针对挑战二（主动实验设计）**：当某 KU 的 β 停留在 `[0.4, 0.6]` 超过 T 轮（T 由资源预算决定），系统自动生成 sub-hypothesis 实验：
-
-```python
-if β ∈ [0.4, 0.6] for T rounds:
-    decompose H into {H_sub1, H_sub2, ...}
-    by identifying which dimension of C is most uncertain
-    (measured by conditional entropy H(β|C_i))
-    rank sub-experiments by EVOI
-    dispatch top-k within budget
-```
-
-这使得递归假设拆解有收敛条件（entropy 下降），而非无限递归。
+**对无效实验（无 real delta）的处理**：不丢弃，而是将其结果写入 KU 的 E 集合，更新后验 `P(H|E)` 下调，同时记录"负证据"——**负证据本身就是知识**，它缩小了未来实验的搜索空间。
 
 ---
 
-## 五、核心焦点（我方认为真正的争议在这里）
+### 五、本场核心争议（我方预判）
 
-**焦点一：局部反馈信号的可信度边界在哪里？**
+**争议一（进化机制）**：进化触发应该是**反应式**（reactive，等观测到性能变化再更新）还是**主动式**（proactive，由不确定性主动设计实验）？
 
-对方方案若依赖密集 ablation 或频繁 benchmark，会遭遇成本爆炸；若依赖 Canary 作为主反馈，则进化周期过长。我方用 EVOI + 贝叶斯置信度在两者之间建立了一个有理论保证的中间层。**这个中间层的设计是否合理，是全场最核心的争议。**
-
-**焦点二："不知道为什么快了"是否是系统失败？**
-
-我方认为，β 高但 H 解释性弱的 KU，应被标记为 `empirical-only`，在调度时权重降低，直到通过 sub-hypothesis 实验提升解释性。**这个"可解释性惩罚"的设计逻辑，也将是本场争议焦点之一。**
+**争议二（反馈机制）**：在 Canary 信号稀疏的情况下，中间反馈的代理指标（proxy metrics）的有效性与可信度——谁来保证代理指标不与 Canary 脱钩？
 
 ---
 
-等待对方立论及裁判引导。
+**我方立场明确：主动优于反应，因果优于相关，不确定性量化是整个系统的神经中枢。**

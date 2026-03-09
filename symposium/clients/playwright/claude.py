@@ -15,33 +15,81 @@ class ClaudeWebClient(PlaywrightChatClient):
     start_url = "https://claude.ai/new"
 
     def ensure_best_config(self):
+        """Select Claude Opus (strongest model) + Extended Thinking mode.
+
+        Strategy:
+          1. Open model selector dropdown
+          2. Explicitly try to click any Opus option first (highest priority)
+          3. Fall back to LLM chooser if no Opus found
+          4. Then try to enable Extended / Extended thinking mode
+        """
         page = self._page
         try:
+            # Open model selector
             btn = page.locator('[data-testid="model-selector-dropdown"]').first
             current = btn.inner_text(timeout=2000).strip()
             btn.click(timeout=3000)
             page.wait_for_timeout(1200)
+
+            # Collect all visible menu options
             options = page.evaluate('''() => [...document.querySelectorAll('[role="menuitem"],button,[role="option"]')]
                 .map(el => (el.innerText||el.textContent||'').trim())
                 .filter(Boolean)
                 .filter(t => t.length < 120)
                 .slice(0,120)''')
-            choice = choose_best('Claude', current, options)
-            for target in [choice.get('target_model', ''), choice.get('target_mode', '')]:
-                if not target:
-                    continue
+
+            # Priority 1: explicitly try to click Opus (strongest)
+            opus_found = False
+            opus_keywords = ["Opus", "opus"]
+            for kw in opus_keywords:
                 try:
-                    el = page.locator(f'button:has-text("{target}")').first
-                    if el.is_visible(timeout=1000):
-                        el.click(timeout=2000)
-                        page.wait_for_timeout(700)
+                    matches = page.locator(f'[role="menuitem"]:has-text("{kw}"), button:has-text("{kw}"), [role="option"]:has-text("{kw}")')
+                    if matches.count() > 0:
+                        matches.first.click(timeout=2000)
+                        page.wait_for_timeout(800)
+                        opus_found = True
+                        break
                 except Exception:
                     pass
+
+            if not opus_found:
+                # Fallback: LLM chooser
+                choice = choose_best('Claude', current, options)
+                target_model = choice.get('target_model', '')
+                if target_model:
+                    try:
+                        el = page.locator(f'button:has-text("{target_model}"), [role="menuitem"]:has-text("{target_model}")').first
+                        if el.is_visible(timeout=1000):
+                            el.click(timeout=2000)
+                            page.wait_for_timeout(700)
+                    except Exception:
+                        pass
+
+            # Extended thinking mode (if available)
+            thinking_keywords = ["Extended thinking", "Extended", "Think"]
+            for kw in thinking_keywords:
+                try:
+                    el = page.locator(f'button:has-text("{kw}"), [role="option"]:has-text("{kw}"), [role="menuitem"]:has-text("{kw}")').first
+                    if el.is_visible(timeout=800):
+                        el.click(timeout=1500)
+                        page.wait_for_timeout(500)
+                        break
+                except Exception:
+                    pass
+
             try:
                 page.keyboard.press('Escape')
                 page.wait_for_timeout(300)
             except Exception:
                 pass
+
+            # Log which model is now active
+            try:
+                new_label = page.locator('[data-testid="model-selector-dropdown"]').first.inner_text(timeout=1500).strip()
+                print(f"  [Claude] 模型切换后: {new_label}")
+            except Exception:
+                pass
+
         except Exception:
             pass
 
