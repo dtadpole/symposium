@@ -1,0 +1,104 @@
+# 【第1轮：开篇立论】
+
+---
+
+## 一、明确立场
+
+**我方核心主张：自我进化的知识库，本质是一个"置信度驱动的实验预算分配系统"。**
+
+进化不是自动发生的状态转换，而是一个受控的科学过程：每一次状态变更（Revised / Merged / Superseded 等）都必须有置信度背书，每一次实验都必须经过预算评估。知识库的质量不由知识的数量决定，而由**每一个 Knowledge Unit 的置信度是否可信、是否经过足够验证**决定。
+
+这场辩论应该按以下维度来比：**在资源受限、Canary 信号稀疏的条件下，哪个设计能让每一次进化操作的期望收益最大、退化风险最小。**
+
+---
+
+## 二、关键定义
+
+**Knowledge Unit（KU）**：一张带唯一 UUID 的知识卡片，包含：
+- `hypothesis`：优化策略的因果陈述（"为什么快"，而非只是"快了多少"）
+- `confidence_score ∈ [0, 1]`：基于实验证据的置信度估计
+- `evidence_log`：所有支撑实验的记录（含"无 real delta"的实验）
+- `scope`：适用边界（硬件型号、算子类型、内存布局等）
+- `state`：生命周期状态
+
+**净进化（Net Evolution）**：一次状态变更操作，当且仅当：
+`E[Δperformance | mutation] - cost(experiment) > 0`
+即期望性能增益扣除实验成本后为正，才构成净进化。
+
+**置信度（Confidence）**：不是模糊的"我们比较确定"，而是：
+`confidence = f(n_experiments, effect_size, variance, scope_coverage)`
+具体为：通过多次独立实验、效果量显著性检验（effect size test）、跨 scope 覆盖度三者的加权函数给出的数值。
+
+---
+
+## 三、判断标准
+
+本场辩论的最优方案，应满足以下三个可量化标准：
+
+1. **进化精度**：状态变更操作中，净退化率 < 阈值（例如 5%）
+2. **实验效率**：单位计算预算产生的置信度提升量最大化
+3. **知识可解释性**：每个 KU 能回答"为什么"，而非只记录"是什么"——因为不可解释的知识无法在新场景泛化
+
+---
+
+## 四、两个核心论点
+
+### 论点一：无 real delta 的实验是知识库的"负资产"，但可以转化为"边界约束"
+
+当一次实验跑完发现无显著差异（Δ < ε），多数方案选择丢弃或忽略这条记录。**这是错误的。**
+
+我方方案：**"零收益实验"必须写入 KU 的 `evidence_log`，并触发 scope 边界收缩。**
+
+具体机制：
+- 定义 `null_delta_threshold ε`（例如 p > 0.05 或 speedup < 1%）
+- 若实验结果落入零区间，则不触发 KU 状态升级，但触发 `scope_shrink` 操作：将该 KU 的适用范围从 `scope_A`（包含此次失效场景）收缩为 `scope_A \ {failed_context}`
+- 积累足够的 scope_shrink 记录后，触发 `Split`：将一个宽泛的 KU 拆分为多个 scope 精确的子 KU
+
+**这样，无效实验不是浪费，而是在精确化知识的适用边界。**
+
+---
+
+### 论点二：主动实验设计必须通过"假设树 + 预算评分"控制递归成本
+
+当系统只有一个速度数字、不理解"为什么快"时，不能无限制地递归产生 sub-hypothesis。必须有一个停止条件和优先级函数。
+
+我方方案：**构建 Hypothesis Tree，每个节点有 `experiment_value` 评分，系统按评分做贪心实验排序。**
+
+具体机制：
+
+**Hypothesis Tree 结构：**
+```
+Root Hypothesis H₀: "Tiling size T=128 improves throughput"
+├── Sub-H₁: "T=128 reduces cache miss rate" (cost: low, verifiability: high)
+├── Sub-H₂: "T=128 improves warp occupancy" (cost: medium, verifiability: medium)
+└── Sub-H₃: "T=128 reduces memory bank conflict" (cost: high, verifiability: low)
+```
+
+**实验价值评分函数：**
+`V(H) = (prior_confidence_gain × scope_coverage) / (compute_cost × time_cost)`
+
+- `prior_confidence_gain`：预期能提升多少置信度（基于历史相似实验的统计）
+- `scope_coverage`：验证结果能覆盖多少未来场景
+- `compute_cost` + `time_cost`：实验的实际消耗
+
+**触发条件（何时需要主动实验）：**
+当 KU 的 `confidence_score < θ_min`（例如 0.6）且 `hypothesis` 字段为空或仅有"观测结果"而无因果陈述时，系统将该 KU 标记为 `needs_explanation`，并自动从 Hypothesis Tree 中选取 `V(H)` 最高的子假设，优先安排实验。
+
+**No-regret 实验的判断标准：**
+当 `compute_cost < C_low` 且 `prior_confidence_gain > G_min` 时，该实验被标记为 no-regret，可直接执行无需审批。
+反之（高成本、低期望收益），需人工或高层策略介入决策。
+
+**递归终止条件：**
+`depth(sub-hypothesis) ≤ D_max`，且 `V(H) > V_threshold`，否则剪枝，不产生孙 hypothesis。
+
+---
+
+## 五、核心焦点
+
+**我方认为，本场真正的争议集中在以下两点：**
+
+**焦点一：进化的最小证据门槛应该是多少？**
+——多少实验、多高的 effect size，才能让一次状态变更从 `Revised` 升格为稳定知识？不同方案对这个门槛的设定，决定了整个系统的保守程度与进化速度的权衡。
+
+**焦点二：Canary 信号稀疏时，局部置信度能否代理全局质量？**
+——Canary 成本高、不能频繁触发，那在 Canary 两次运行之间，系统靠什么判断自己是在净进化？我方认为，局部 confidence_score

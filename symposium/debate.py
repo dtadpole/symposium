@@ -400,6 +400,12 @@ class SymposiumEngine:
         Only returns after ALL clients have completed steps 1-4.
         """
         self._log("   ⏳ 等待各方回复（双方都完成才继续）...")
+        # Minimum wait before polling: let AIs start generating so stop-button appears.
+        # Without this, stale R(N-1) feedback buttons trigger false Phase-2 immediately.
+        MIN_INITIAL_WAIT = 12  # seconds
+        self._log(f"   ⏱  等待 {MIN_INITIAL_WAIT}s，确保 AI 开始生成后再轮询...")
+        time.sleep(MIN_INITIAL_WAIT)
+
         start = time.time()
         pending = {c.name: c for c in self.clients}
         results: dict[str, str] = {}
@@ -441,7 +447,7 @@ class SymposiumEngine:
                             snap = _page_state_snapshot(c._page, c.name)
                             cur_len = snap.get("text_len", 0)
                             baseline = _baseline_len.get(name, 0)
-                            if cur_len > baseline + 300:
+                            if cur_len > baseline + 800:
                                 self._log(f"   🟡 {name} stop button missed (fast response), text +{cur_len - baseline} chars — treating as done")
                                 _seen_generating.add(name)
                             else:
